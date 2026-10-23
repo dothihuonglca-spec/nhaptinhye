@@ -11,6 +11,7 @@ export interface LocalDataSnapshot {
 
 export interface LocalDataBackupDiagnostics {
   topLevelKeys: string[];
+  householdFieldPath: string;
   householdFieldType: string;
   householdArrayLength: number;
   householdObjectCount: number;
@@ -98,20 +99,29 @@ function number(value: unknown, fallback = 0): number {
 
 export function inspectLocalDataBackup(value: unknown): LocalDataBackupDiagnostics {
   const root = isRecord(value) ? value : {};
-  const rootHouseholds = Array.isArray(root.households) ? root.households : [];
+  const data = isRecord(root.data) ? root.data : {};
+  const householdValue = Array.isArray(root.households) ? root.households : data.households;
+  const householdFieldPath = Array.isArray(root.households)
+    ? 'households'
+    : data.households !== undefined
+      ? 'data.households'
+      : 'households';
+  const rootHouseholds = Array.isArray(householdValue) ? householdValue : [];
   const householdRecords = rootHouseholds.filter(isRecord);
   const surveyAreas = recordsFrom(root.surveyAreas) || [];
-  const areas = recordsFrom(root.areas) || surveyAreas;
+  const rootAreas = recordsFrom(root.areas);
+  const areas = rootAreas?.length ? rootAreas : surveyAreas;
   const householdRecordsNestedUnderAreas = areas.reduce((count, area) =>
     count + (Array.isArray(area.households) ? area.households.filter(isRecord).length : 0), 0);
 
   return {
     topLevelKeys: Object.keys(root),
-    householdFieldType: Array.isArray(root.households)
+    householdFieldPath,
+    householdFieldType: Array.isArray(householdValue)
       ? 'array'
-      : root.households === undefined
+      : householdValue === undefined
         ? 'missing'
-        : typeof root.households,
+        : typeof householdValue,
     householdArrayLength: rootHouseholds.length,
     householdObjectCount: householdRecords.length,
     householdRecordsWithId: householdRecords.filter(record => Boolean(text(record.id).trim())).length,
@@ -158,10 +168,12 @@ export function parseLocalDataBackup(
     throw new Error('Danh sách xã trong file sao lưu thiếu mã hoặc tên xã.');
   }
 
-  const rootHouseholds = Array.isArray(value.households)
-    ? value.households.filter(isRecord)
+  const data = isRecord(value.data) ? value.data : {};
+  const householdValue = Array.isArray(value.households) ? value.households : data.households;
+  const rootHouseholds = Array.isArray(householdValue)
+    ? householdValue.filter(isRecord)
     : [];
-  if (Array.isArray(value.households) && rootHouseholds.length !== value.households.length) {
+  if (Array.isArray(householdValue) && rootHouseholds.length !== householdValue.length) {
     throw new Error('Danh sách hộ trong file sao lưu không hợp lệ.');
   }
 
