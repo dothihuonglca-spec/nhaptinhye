@@ -3226,7 +3226,11 @@ export default function App() {
       const parsed: unknown = JSON.parse(await file.text());
       const restored = parseLocalDataBackup(parsed, surveyors, departments);
       if (restored.households.length === 0 || restored.areas.length === 0) {
-        throw new Error('Bản sao lưu không có hộ hoặc địa bàn; dữ liệu hiện tại chưa bị thay đổi.');
+        throw new Error(
+          `Sau khi đọc file, hệ thống nhận được ${restored.communes.length} xã, ` +
+          `${restored.areas.length} địa bàn và ${restored.households.length} hộ. ` +
+          'Cần có ít nhất 1 địa bàn và 1 hộ; dữ liệu hiện tại chưa bị thay đổi.'
+        );
       }
       const confirmed = window.confirm(
         `Khôi phục ${file.name}?\n\n` +
