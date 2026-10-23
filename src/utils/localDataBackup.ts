@@ -382,10 +382,14 @@ export function parseLocalDataBackup(
   return { communes, areas, households, surveyors: importedSurveyors, departments };
 }
 
-export function serializeLocalDataBackup(snapshot: LocalDataSnapshot): string {
+export function serializeLocalDataBackup(
+  snapshot: LocalDataSnapshot,
+  backupOwner?: Pick<Surveyor, 'id' | 'role'>
+): string {
   return JSON.stringify({
     version: 1,
     cachedAt: new Date().toISOString(),
+    ...(backupOwner ? { backupOwner } : {}),
     communes: snapshot.communes,
     areas: snapshot.areas,
     households: snapshot.households,
