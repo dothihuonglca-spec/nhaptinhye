@@ -120,11 +120,92 @@ export function createSurveyWorkPackage(
   };
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseLegacyAreaResult(data: Record<string, unknown>): SurveyWorkPackage | null {
+  if (data.format !== 'tnh-area-package') return null;
+  if (data.version !== 1 || data.kind !== 'RESULT') {
+    throw new Error('File JSON địa bàn không phải gói kết quả ĐTV hợp lệ.');
+  }
+
+  const surveyorId = typeof data.surveyorId === 'string' ? data.surveyorId : '';
+  const surveyorName = typeof data.surveyorName === 'string' ? data.surveyorName : '';
+  const exportedAt = typeof data.exportedAt === 'string' ? data.exportedAt : '';
+  if (!surveyorId || !surveyorName || !exportedAt) {
+    throw new Error('File kết quả địa bàn thiếu mã ĐTV, tên ĐTV hoặc thời điểm xuất.');
+  }
+  if (!Array.isArray(data.households) || data.households.length === 0) {
+    throw new Error('File kết quả địa bàn không có danh sách hộ.');
+  }
+
+  const households = data.households.map((value): Household => {
+    if (!isRecord(value) || typeof value.id !== 'string' || !value.id) {
+      throw new Error('File kết quả địa bàn có hộ thiếu mã hộ.');
+    }
+    const household = value as unknown as Household;
+    if (
+      !household.areaId ||
+      !household.areaCode ||
+      !household.communeId ||
+      !household.communeCode ||
+      (household.assignedSurveyorId && household.assignedSurveyorId !== surveyorId)
+    ) {
+      throw new Error('File kết quả địa bàn có hộ sai địa bàn hoặc không khớp ĐTV xuất file.');
+    }
+    return household;
+  });
+
+  const firstHousehold = households[0];
+  if (households.some(household =>
+    household.areaId !== firstHousehold.areaId ||
+    household.areaCode !== firstHousehold.areaCode ||
+    household.communeId !== firstHousehold.communeId ||
+    household.communeCode !== firstHousehold.communeCode
+  )) {
+    throw new Error('File kết quả địa bàn chứa hộ thuộc nhiều địa bàn hoặc xã.');
+  }
+
+  const area: SurveyArea = {
+    id: firstHousehold.areaId,
+    communeId: firstHousehold.communeId,
+    communeCode: firstHousehold.communeCode,
+    code: firstHousehold.areaCode,
+    name: typeof data.areaName === 'string' ? data.areaName : firstHousehold.areaName,
+    householdCount: households.length
+  };
+  const commune: Commune = {
+    id: firstHousehold.communeId,
+    communeCode: firstHousehold.communeCode,
+    communeName: typeof data.communeName === 'string' ? data.communeName : firstHousehold.communeName,
+    tkcsCode: typeof data.tkcsCode === 'string' ? data.tkcsCode : firstHousehold.tkcsCode,
+    tkcsName: typeof data.tkcsName === 'string' ? data.tkcsName : firstHousehold.tkcsName
+  };
+
+  return {
+    type: 'SURVEY_WORK_PACKAGE',
+    version: '1.0',
+    purpose: 'RESULTS',
+    exportedAt,
+    exportedBy: { id: surveyorId, name: surveyorName, role: 'SURVEYOR' },
+    entries: [{
+      surveyorId,
+      surveyorName,
+      area,
+      commune,
+      households
+    }]
+  };
+}
+
 export function parseSurveyWorkPackage(text: string): SurveyWorkPackage {
   const data: unknown = JSON.parse(text);
-  if (!data || typeof data !== 'object') {
+  if (!isRecord(data)) {
     throw new Error('Tệp JSON không chứa gói công việc hợp lệ.');
   }
+  const legacyResult = parseLegacyAreaResult(data);
+  if (legacyResult) return legacyResult;
   const workPackage = data as Partial<SurveyWorkPackage>;
   const exportedBy = workPackage.exportedBy;
   if (
