@@ -9,6 +9,16 @@ export interface LocalDataSnapshot {
   departments: Department[];
 }
 
+export interface LocalDataBackupDiagnostics {
+  topLevelKeys: string[];
+  householdFieldType: string;
+  householdArrayLength: number;
+  householdObjectCount: number;
+  householdRecordsWithId: number;
+  householdRecordsWithAreaId: number;
+  householdRecordsNestedUnderAreas: number;
+}
+
 const DATABASE_NAME = 'survey-local-data';
 const STORE_NAME = 'snapshots';
 const CURRENT_KEY = 'current';
@@ -84,6 +94,32 @@ function text(value: unknown, fallback = ''): string {
 function number(value: unknown, fallback = 0): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+export function inspectLocalDataBackup(value: unknown): LocalDataBackupDiagnostics {
+  const root = isRecord(value) ? value : {};
+  const rootHouseholds = Array.isArray(root.households) ? root.households : [];
+  const householdRecords = rootHouseholds.filter(isRecord);
+  const surveyAreas = recordsFrom(root.surveyAreas) || [];
+  const areas = recordsFrom(root.areas) || surveyAreas;
+  const householdRecordsNestedUnderAreas = areas.reduce((count, area) =>
+    count + (Array.isArray(area.households) ? area.households.filter(isRecord).length : 0), 0);
+
+  return {
+    topLevelKeys: Object.keys(root),
+    householdFieldType: Array.isArray(root.households)
+      ? 'array'
+      : root.households === undefined
+        ? 'missing'
+        : typeof root.households,
+    householdArrayLength: rootHouseholds.length,
+    householdObjectCount: householdRecords.length,
+    householdRecordsWithId: householdRecords.filter(record => Boolean(text(record.id).trim())).length,
+    householdRecordsWithAreaId: householdRecords.filter(record =>
+      Boolean(text(record.areaId).trim() || text(record.areaCode).trim())
+    ).length,
+    householdRecordsNestedUnderAreas
+  };
 }
 
 function recordsFrom(value: unknown): Record<string, unknown>[] | null {
