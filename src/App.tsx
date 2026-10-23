@@ -3643,6 +3643,9 @@ export default function App() {
           incoming.surveyStatus === 'DANG_NHAP' ||
           incoming.surveyStatus === 'DA_HOAN_THANH' ||
           incoming.surveyStatus === 'DA_DUYET' ||
+          incoming.surveyStatus === 'IN_PROGRESS' ||
+          incoming.surveyStatus === 'COMPLETED' ||
+          incoming.surveyStatus === 'HOAN_THANH' ||
           Boolean(incoming.questionnaire && (
             incoming.questionnaire.muc1_has ||
             incoming.questionnaire.muc2_has ||
@@ -3698,11 +3701,25 @@ export default function App() {
         if (Number.isFinite(existingTime) && Number.isFinite(incomingTime) && incomingTime < existingTime) {
           continue;
         }
+        const normalizedIncomingStatus: SurveyStatus | undefined =
+          incoming.surveyStatus === 'COMPLETED' || incoming.surveyStatus === 'HOAN_THANH'
+            ? 'DA_HOAN_THANH'
+            : incoming.surveyStatus === 'IN_PROGRESS'
+              ? 'DANG_NHAP'
+              : incoming.surveyStatus === 'PENDING'
+                ? 'CHUA_NHAP'
+                : incoming.surveyStatus;
+        const progressStatus = normalizedIncomingStatus &&
+          normalizedIncomingStatus !== 'CHUA_NHAP'
+          ? normalizedIncomingStatus
+          : hasSurveyData
+            ? 'DANG_NHAP'
+            : existing.surveyStatus;
         nextHouseholds[householdIndex] = {
           ...existing,
           assignedSurveyorId: resolvedSurveyorId,
           assignedSurveyorName: resolvedSurveyorName,
-          surveyStatus: incoming.surveyStatus || existing.surveyStatus,
+          surveyStatus: progressStatus,
           questionnaire: incoming.questionnaire || existing.questionnaire,
           updatedAt: incoming.updatedAt || workPackage.exportedAt,
           updatedBy: incoming.updatedBy || resolvedSurveyorName,
