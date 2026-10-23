@@ -6,6 +6,7 @@
 import React, { useState, useMemo } from 'react';
 import type { Commune, Household, SurveyArea } from '../App';
 import type { Surveyor } from '../types/user';
+import type { AreaProgressSnapshot } from '../utils/areaDataTransfer';
 import { 
   Users, CheckCircle2, Clock, AlertCircle, Search, 
   FileSpreadsheet, FileText, Filter, Eye, ChevronRight, MapPin, 
@@ -20,6 +21,7 @@ interface SurveyorProgressViewProps {
   areas: SurveyArea[];
   communes: Commune[];
   currentUser: Surveyor;
+  cloudProgress: AreaProgressSnapshot[];
   onOpenHouseholdForm?: (household: Household) => void;
   onNavigateToHouseholdEntry?: (surveyorNameOrId: string, areaId?: string, communeId?: string) => void;
   showNotification: (type: 'success' | 'error', msg: string) => void;
@@ -50,6 +52,7 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
   areas,
   communes,
   currentUser,
+  cloudProgress,
   onOpenHouseholdForm,
   onNavigateToHouseholdEntry,
   showNotification
@@ -248,13 +251,11 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
       const officialHHs = allAreaHHs.filter(h => (h.sampleStatus || 'CHÍNH THỨC') !== 'DỰ PHÒNG').slice(0, 10);
       const assignedHHs = officialHHs.length > 0 ? officialHHs : allAreaHHs.slice(0, 10);
 
-      const totalHouseholds = assignedHHs.length;
-      const approvedHouseholds = assignedHHs.filter(h => h.surveyStatus === 'DA_DUYET').length;
-      const completedHouseholds = assignedHHs.filter(h => h.surveyStatus === 'DA_HOAN_THANH').length;
-      const inProgressHouseholds = assignedHHs.filter(h => h.surveyStatus === 'DANG_NHAP').length;
-      const doneTotal = approvedHouseholds + completedHouseholds;
-      const unenteredHouseholds = totalHouseholds - (doneTotal + inProgressHouseholds);
-      const completionRate = totalHouseholds > 0 ? Math.round((doneTotal / totalHouseholds) * 100) : 0;
+      const localTotalHouseholds = assignedHHs.length;
+      const localCompletedHouseholds = assignedHHs.filter(h =>
+        h.surveyStatus === 'DA_DUYET' || h.surveyStatus === 'DA_HOAN_THANH'
+      ).length;
+      const localInProgressHouseholds = assignedHHs.filter(h => h.surveyStatus === 'DANG_NHAP').length;
 
       // Tìm tên người nhập / ĐTV phụ trách địa bàn này
       const surveyorSet = new Set<string>();
@@ -273,6 +274,33 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
           }
         }
       });
+
+      const remoteProgress = cloudProgress.filter(item =>
+        item.areaId === area.id ||
+        (item.areaCode === area.code && (
+          item.communeId === area.communeId ||
+          item.communeCode === area.communeCode
+        ))
+      );
+      remoteProgress.forEach(item => surveyorSet.add(item.surveyorName));
+      const totalHouseholds = Math.max(
+        localTotalHouseholds,
+        ...remoteProgress.map(item => item.totalHouseholds),
+        0
+      );
+      const doneTotal = Math.min(totalHouseholds, Math.max(
+        localCompletedHouseholds,
+        remoteProgress.reduce((total, item) => total + item.completedHouseholds, 0)
+      ));
+      const inProgressHouseholds = Math.min(
+        totalHouseholds - doneTotal,
+        Math.max(
+          localInProgressHouseholds,
+          remoteProgress.reduce((total, item) => total + item.inProgressHouseholds, 0)
+        )
+      );
+      const unenteredHouseholds = Math.max(0, totalHouseholds - doneTotal - inProgressHouseholds);
+      const completionRate = totalHouseholds > 0 ? Math.round((doneTotal / totalHouseholds) * 100) : 0;
 
       const surveyorNamesStr = surveyorSet.size > 0 ? Array.from(surveyorSet).join(', ') : '---';
       
@@ -302,7 +330,7 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
         householdsList: assignedHHs
       };
     });
-  }, [areas, communes, households, surveyors, currentUser]);
+  }, [areas, communes, households, surveyors, currentUser, cloudProgress]);
 
   // Lọc danh sách theo bộ lọc
   const filteredProgressList = useMemo(() => {

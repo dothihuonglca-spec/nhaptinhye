@@ -1,55 +1,45 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
-    // Departments collection: dynamic department list
-    match /departments/{deptId} {
-      allow read, write: if true;
+    match /areaProgress/{progressId} {
+      allow read: if true;
+      allow create, update: if request.resource.data.keys().hasOnly([
+        'id',
+        'surveyorId',
+        'surveyorName',
+        'areaId',
+        'communeId',
+        'communeCode',
+        'communeName',
+        'areaCode',
+        'areaName',
+        'totalHouseholds',
+        'completedHouseholds',
+        'inProgressHouseholds',
+        'updatedAt'
+      ]) &&
+      request.resource.data.id is string &&
+      request.resource.data.surveyorId is string &&
+      request.resource.data.surveyorName is string &&
+      request.resource.data.areaId is string &&
+      request.resource.data.communeId is string &&
+      request.resource.data.communeCode is string &&
+      request.resource.data.communeName is string &&
+      request.resource.data.areaCode is string &&
+      request.resource.data.areaName is string &&
+      request.resource.data.totalHouseholds is int &&
+      request.resource.data.totalHouseholds >= 0 &&
+      request.resource.data.totalHouseholds <= 10 &&
+      request.resource.data.completedHouseholds is int &&
+      request.resource.data.completedHouseholds >= 0 &&
+      request.resource.data.completedHouseholds <= request.resource.data.totalHouseholds &&
+      request.resource.data.inProgressHouseholds is int &&
+      request.resource.data.inProgressHouseholds >= 0 &&
+      request.resource.data.inProgressHouseholds <= request.resource.data.totalHouseholds &&
+      request.resource.data.updatedAt is string;
+      allow delete: if false;
     }
 
-    // Users and profiles collection: account security & area assignments
-    match /users/{userId} {
-      allow read, write: if true;
-    }
-
-    // Surveys & Questionnaires
-    match /surveys/{surveyId} {
-      allow read, write: if true;
-    }
-    
-    // Administrative units: communes and areas
-    match /communes/{communeId} {
-      allow read, write: if true;
-    }
-
-    match /surveyAreas/{areaId} {
-      allow read, write: if true;
-    }
-    
-    // Household survey data & lists
-    match /households/{householdId} {
-      allow read, write: if true;
-    }
-    
-    // Surveyors & Investigators
-    match /surveyors/{surveyorId} {
-      allow read, write: if true;
-    }
-
-    // Industrial survey module collections (enterprises, establishments, summaries)
-    match /enterprises_01/{id} {
-      allow read, write: if true;
-    }
-
-    match /establishments_02/{id} {
-      allow read, write: if true;
-    }
-
-    match /industrial_summaries/{id} {
-      allow read, write: if true;
-    }
-
-    // Fallback protection for any other collections
     match /{document=**} {
       allow read, write: if false;
     }

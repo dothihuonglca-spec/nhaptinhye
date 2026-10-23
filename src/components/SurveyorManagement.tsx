@@ -63,8 +63,6 @@ interface SurveyorManagementProps {
   onBatchAssignDepartmentArea?: (departmentId: string, areaCodes: string[]) => Promise<void>;
   onSelectActiveUser?: (surveyor: Surveyor) => void;
   showNotification: (type: 'success' | 'error', msg: string) => void;
-  onSyncFirebase?: () => Promise<void>;
-  isSyncing?: boolean;
 }
 
 export default function SurveyorManagement({

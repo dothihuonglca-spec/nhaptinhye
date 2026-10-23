@@ -31,8 +31,6 @@ import IndustrialGuidelinesModal from '../../components/IndustrialGuidelinesModa
 import CommuneFilterSelect from '../../components/CommuneFilterSelect';
 import { OFFICIAL_COMMUNES_CATALOG } from '../../data/communesCatalog';
 import { Surveyor } from '../../types/user';
-import { db, safeFirestoreWrite, handleFirestoreError, OperationType } from '../../firebase';
-import { collection, doc, getDocs, setDoc, deleteDoc } from 'firebase/firestore';
 
 const DEMO_IDS = ['dn_0900123456_01', 'dn_0900654321_02', 'cs_0001_at', 'cs_0002_at'];
 
@@ -114,69 +112,19 @@ export default function IndustrialSurveyPage({
   const [summaryCommuneCode, setSummaryCommuneCode] = useState<string>('11200');
   const [summaryCommuneName, setSummaryCommuneName] = useState<string>('Ân Thi');
 
-  const [isLoadingFirestore, setIsLoadingFirestore] = useState(false);
-
-  // Đọc dữ liệu từ Firebase Firestore khi khởi động (chỉ lấy dữ liệu thực)
+  // Dữ liệu khảo sát công nghiệp chỉ được lưu trên thiết bị hiện tại.
   useEffect(() => {
-    const fetchFirestoreData = async () => {
-      setIsLoadingFirestore(true);
-      try {
-        // 1. Enterprises 01
-        const entSnap = await getDocs(collection(db, 'enterprises_01'));
-        if (!entSnap.empty) {
-          const loadedEnts: EnterpriseSurvey01[] = entSnap.docs
-            .map(d => ({ ...(d.data() as EnterpriseSurvey01), id: d.id }))
-            .filter(d => !DEMO_IDS.includes(d.id));
-          setEnterprises(loadedEnts);
-          try { localStorage.setItem('cached_enterprises_01', JSON.stringify(loadedEnts)); } catch (e) {}
+    try {
+      localStorage.setItem('cached_enterprises_01', JSON.stringify(enterprises));
+      localStorage.setItem('cached_establishments_02', JSON.stringify(establishments));
+      localStorage.setItem('cached_industrial_summaries', JSON.stringify(summaries));
+    } catch (err) {
+      console.error('Không thể lưu dữ liệu khảo sát công nghiệp trên thiết bị:', err);
+      showNotify('error', 'Không đủ dung lượng trên máy để lưu dữ liệu khảo sát công nghiệp.');
+    }
+  }, [enterprises, establishments, summaries]);
 
-          entSnap.docs.forEach(async d => {
-            if (DEMO_IDS.includes(d.id)) {
-              await safeFirestoreWrite(() => deleteDoc(doc(db, 'enterprises_01', d.id)));
-            }
-          });
-        } else {
-          setEnterprises([]);
-          localStorage.removeItem('cached_enterprises_01');
-        }
-
-        // 2. Establishments 02
-        const estSnap = await getDocs(collection(db, 'establishments_02'));
-        if (!estSnap.empty) {
-          const loadedEsts: IndividualEstablishment02[] = estSnap.docs
-            .map(d => ({ ...(d.data() as IndividualEstablishment02), id: d.id }))
-            .filter(d => !DEMO_IDS.includes(d.id));
-          setEstablishments(loadedEsts);
-          try { localStorage.setItem('cached_establishments_02', JSON.stringify(loadedEsts)); } catch (e) {}
-
-          estSnap.docs.forEach(async d => {
-            if (DEMO_IDS.includes(d.id)) {
-              await safeFirestoreWrite(() => deleteDoc(doc(db, 'establishments_02', d.id)));
-            }
-          });
-        } else {
-          setEstablishments([]);
-          localStorage.removeItem('cached_establishments_02');
-        }
-
-        // 3. Summaries
-        const sumSnap = await getDocs(collection(db, 'industrial_summaries'));
-        if (!sumSnap.empty) {
-          const loadedSums: IndustrialSummaryReport[] = sumSnap.docs.map(d => ({ ...(d.data() as IndustrialSummaryReport), id: d.id }));
-          setSummaries(loadedSums);
-          try { localStorage.setItem('cached_industrial_summaries', JSON.stringify(loadedSums)); } catch (e) {}
-        }
-      } catch (err: any) {
-        console.warn('Lỗi đọc Firestore điều tra công nghiệp, sử dụng offline cache:', err);
-      } finally {
-        setIsLoadingFirestore(false);
-      }
-    };
-
-    fetchFirestoreData();
-  }, []);
-
-  // LƯU DOANH NGHIỆP 01 (Firebase + Local)
+  // LƯU DOANH NGHIỆP 01 trên thiết bị hiện tại
   const handleSaveEnterprise = async (data: EnterpriseSurvey01) => {
     const updated = enterprises.some(e => e.id === data.id)
       ? enterprises.map(e => (e.id === data.id ? data : e))
@@ -187,13 +135,7 @@ export default function IndustrialSurveyPage({
       localStorage.setItem('cached_enterprises_01', JSON.stringify(updated));
     } catch (e) {}
 
-    try {
-      await safeFirestoreWrite(() => setDoc(doc(db, 'enterprises_01', data.id), data));
-      showNotify('success', `Đã lưu thành công Phiếu 01: [${data.enterpriseCode}] ${data.enterpriseName} lên Firebase!`);
-    } catch (err: any) {
-      handleFirestoreError(err, OperationType.WRITE, `Lưu DN ${data.enterpriseCode}`);
-      showNotify('error', `Lỗi đồng bộ Firebase, đã lưu tại bộ nhớ máy.`);
-    }
+    showNotify('success', `Đã lưu Phiếu 01: [${data.enterpriseCode}] ${data.enterpriseName} trên máy này.`);
     setIsEnterpriseModalOpen(false);
   };
 
@@ -207,15 +149,10 @@ export default function IndustrialSurveyPage({
       localStorage.setItem('cached_enterprises_01', JSON.stringify(filtered));
     } catch (e) {}
 
-    try {
-      await safeFirestoreWrite(() => deleteDoc(doc(db, 'enterprises_01', id)));
-      showNotify('success', `Đã xóa Doanh nghiệp "${name}" khỏi hệ thống.`);
-    } catch (err: any) {
-      handleFirestoreError(err, OperationType.DELETE, `Xóa DN ${id}`);
-    }
+    showNotify('success', `Đã xóa Doanh nghiệp "${name}" khỏi máy này.`);
   };
 
-  // LƯU CƠ SỞ CÁ THỂ 02 (Firebase + Local)
+  // LƯU CƠ SỞ CÁ THỂ 02 trên thiết bị hiện tại
   const handleSaveEstablishment = async (data: IndividualEstablishment02) => {
     const updated = establishments.some(cs => cs.id === data.id)
       ? establishments.map(cs => (cs.id === data.id ? data : cs))
@@ -226,13 +163,7 @@ export default function IndustrialSurveyPage({
       localStorage.setItem('cached_establishments_02', JSON.stringify(updated));
     } catch (e) {}
 
-    try {
-      await safeFirestoreWrite(() => setDoc(doc(db, 'establishments_02', data.id), data));
-      showNotify('success', `Đã lưu thành công Phiếu 02: [${data.establishmentOrder || data.id}] ${data.establishmentName} lên Firebase!`);
-    } catch (err: any) {
-      handleFirestoreError(err, OperationType.WRITE, `Lưu Cơ sở ${data.establishmentOrder || data.id}`);
-      showNotify('error', `Lỗi đồng bộ Firebase, đã lưu tại bộ nhớ máy.`);
-    }
+    showNotify('success', `Đã lưu Phiếu 02: [${data.establishmentOrder || data.id}] ${data.establishmentName} trên máy này.`);
     setIsEstablishmentModalOpen(false);
   };
 
@@ -246,15 +177,10 @@ export default function IndustrialSurveyPage({
       localStorage.setItem('cached_establishments_02', JSON.stringify(filtered));
     } catch (e) {}
 
-    try {
-      await safeFirestoreWrite(() => deleteDoc(doc(db, 'establishments_02', id)));
-      showNotify('success', `Đã xóa Cơ sở cá thể "${name}" khỏi hệ thống.`);
-    } catch (err: any) {
-      handleFirestoreError(err, OperationType.DELETE, `Xóa Cơ sở ${id}`);
-    }
+    showNotify('success', `Đã xóa Cơ sở cá thể "${name}" khỏi máy này.`);
   };
 
-  // LƯU BIỂU TỔNG HỢP 03/04 (Firebase + Local)
+  // LƯU BIỂU TỔNG HỢP 03/04 trên thiết bị hiện tại
   const handleSaveSummary = async (report: IndustrialSummaryReport) => {
     const updated = summaries.some(s => s.id === report.id)
       ? summaries.map(s => (s.id === report.id ? report : s))
@@ -265,12 +191,7 @@ export default function IndustrialSurveyPage({
       localStorage.setItem('cached_industrial_summaries', JSON.stringify(updated));
     } catch (e) {}
 
-    try {
-      await safeFirestoreWrite(() => setDoc(doc(db, 'industrial_summaries', report.id), report));
-      showNotify('success', `Đã lưu ${report.reportTitle} của xã [${report.communeName}] lên Firebase!`);
-    } catch (err: any) {
-      handleFirestoreError(err, OperationType.WRITE, `Lưu Biểu tổng hợp ${report.id}`);
-    }
+    showNotify('success', `Đã lưu ${report.reportTitle} của xã [${report.communeName}] trên máy này.`);
   };
 
   // XÓA TOÀN BỘ SỐ LIỆU ĐỂ BẮT ĐẦU NHẬP MỚI
@@ -280,23 +201,11 @@ export default function IndustrialSurveyPage({
     );
     if (!confirmed) return;
 
-    try {
-      for (const ent of enterprises) {
-        await safeFirestoreWrite(() => deleteDoc(doc(db, 'enterprises_01', ent.id)));
-      }
-      for (const cs of establishments) {
-        await safeFirestoreWrite(() => deleteDoc(doc(db, 'establishments_02', cs.id)));
-      }
-
-      setEnterprises([]);
-      setEstablishments([]);
-      localStorage.removeItem('cached_enterprises_01');
-      localStorage.removeItem('cached_establishments_02');
-
-      showNotify('success', 'Đã xóa sạch số liệu, hệ thống sẵn sàng cho bạn nhập tin theo đúng công thức!');
-    } catch (e) {
-      showNotify('error', 'Lỗi khi xóa số liệu trên máy chủ.');
-    }
+    setEnterprises([]);
+    setEstablishments([]);
+    localStorage.removeItem('cached_enterprises_01');
+    localStorage.removeItem('cached_establishments_02');
+    showNotify('success', 'Đã xóa số liệu trên máy này; có thể bắt đầu nhập dữ liệu mới.');
   };
 
   // Thêm mới Phiếu 01
@@ -523,7 +432,7 @@ export default function IndustrialSurveyPage({
             <div className="flex items-center gap-2 text-amber-900">
               <Database className="w-4 h-4 text-amber-600 shrink-0" />
               <span>
-                Hệ thống đang lưu trữ <strong>{enterprises.length}</strong> Doanh nghiệp và <strong>{establishments.length}</strong> Cơ sở cá thể. Số liệu lưu tự động trên Firebase Firestore và bộ nhớ máy.
+                Hệ thống đang lưu trữ <strong>{enterprises.length}</strong> Doanh nghiệp và <strong>{establishments.length}</strong> Cơ sở cá thể. Số liệu lưu cục bộ trên máy này.
               </span>
             </div>
             <button
@@ -944,7 +853,7 @@ export default function IndustrialSurveyPage({
           HỆ THỐNG ĐIỀU TRA & TỔNG HỢP CÔNG NGHIỆP TỈNH HƯNG YÊN - THEO CÔNG VĂN SỐ 12/UBND & PHƯƠNG ÁN ĐIỀU TRA NĂM 2026
         </p>
         <p className="text-[11px] text-slate-400 mt-0.5">
-          Dữ liệu lưu trữ độc lập trên Firebase Firestore và bộ nhớ máy • Tích hợp công thức tính toán tự động
+          Dữ liệu lưu trữ cục bộ trên máy này • Tích hợp công thức tính toán tự động
         </p>
       </footer>
 

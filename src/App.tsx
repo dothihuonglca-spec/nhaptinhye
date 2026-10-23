@@ -13,9 +13,8 @@ import {
   Shield, ShieldCheck, Lock, Unlock, Eye, EyeOff, CheckSquare, Square, UserCheck, ShieldAlert, AlertTriangle, X,
   LogOut, LogIn, KeyRound, User, TrendingUp, ExternalLink, RotateCcw
 } from 'lucide-react';
-import { db, handleFirestoreError, OperationType, safeFirestoreWrite, isQuotaExceeded, auth } from './firebase';
-import { collection, getDocs, addDoc, deleteDoc, doc, setDoc, getDoc, query, onSnapshot, writeBatch } from 'firebase/firestore';
-import { onAuthStateChanged } from 'firebase/auth';
+import { db } from './firebase';
+import { collection, doc, setDoc, onSnapshot } from 'firebase/firestore';
 
 import { FullQuestionnaire, createDefaultQuestionnaire } from './types/questionnaire';
 import { calculateFullIncome } from './utils/incomeCalculator';
@@ -37,7 +36,6 @@ import {
 import { 
   OFFICIAL_PERSONNEL_LIST, INITIAL_DEFAULT_PASSWORD, OFFICIAL_5_DEPARTMENTS 
 } from './constants/officialPersonnel';
-import { seedDepartmentsIfEmpty } from './utils/firebaseData';
 import { 
   CATALOG_TRONG_TROT, 
   CATALOG_CHAN_NUOI, 
@@ -48,6 +46,20 @@ import {
   CATALOG_THU_KHAC,
   CatalogItem 
 } from './constants/catalogs';
+import {
+  AreaProgressSnapshot,
+  createAreaProgressSnapshot,
+  parseSurveyWorkPackage,
+  SurveyWorkPackage,
+  isAreaAssigned
+} from './utils/areaDataTransfer';
+import {
+  loadPreRestoreSnapshot,
+  loadLocalDataSnapshot,
+  parseLocalDataBackup,
+  saveLocalDataSnapshot,
+  serializeLocalDataBackup
+} from './utils/localDataBackup';
 
 // Tài khoản Quản trị viên Master thực tế + 58 cán bộ chính thức theo danh sách chuẩn từ ảnh
 export const DEFAULT_SURVEYORS: Surveyor[] = [
@@ -178,7 +190,21 @@ export default function App() {
       const cached = localStorage.getItem('cached_communes');
       if (cached) {
         const parsed = JSON.parse(cached);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const merged = new Map<string, Commune>();
+          OFFICIAL_COMMUNES_CATALOG.forEach(commune =>
+            merged.set(commune.communeCode || commune.id, commune)
+          );
+          parsed.forEach((commune: Commune) => {
+            const existingKey = Array.from(merged.entries()).find(([, existing]) =>
+              existing.id === commune.id ||
+              (existing.communeCode && existing.communeCode === commune.communeCode)
+            )?.[0];
+            const key = existingKey || commune.communeCode || commune.id;
+            merged.set(key, { ...merged.get(key), ...commune });
+          });
+          return Array.from(merged.values());
+        }
       }
     } catch (e) {}
     return OFFICIAL_COMMUNES_CATALOG;
@@ -208,7 +234,14 @@ export default function App() {
       const cached = localStorage.getItem('cached_surveyors');
       if (cached) {
         const parsed = JSON.parse(cached);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const merged = new Map<string, Surveyor>();
+          [DEFAULT_SURVEYORS[0], ...OFFICIAL_PERSONNEL_LIST].forEach(surveyor =>
+            merged.set(surveyor.id, surveyor)
+          );
+          parsed.forEach((surveyor: Surveyor) => merged.set(surveyor.id, surveyor));
+          return Array.from(merged.values());
+        }
       }
     } catch (e) {}
     return [DEFAULT_SURVEYORS[0], ...OFFICIAL_PERSONNEL_LIST];
@@ -218,7 +251,12 @@ export default function App() {
       const cached = localStorage.getItem('cached_departments');
       if (cached) {
         const parsed = JSON.parse(cached);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          const merged = new Map<string, Department>();
+          OFFICIAL_5_DEPARTMENTS.forEach(department => merged.set(department.id, department));
+          parsed.forEach((department: Department) => merged.set(department.id, department));
+          return Array.from(merged.values());
+        }
       }
     } catch (e) {}
     return OFFICIAL_5_DEPARTMENTS;
@@ -226,28 +264,20 @@ export default function App() {
 
   const [currentSurveyorId, setCurrentSurveyorId] = useState<string>('admin');
   const [loading, setLoading] = useState<boolean>(false);
-  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [localDataReady, setLocalDataReady] = useState<boolean>(false);
+  const [cloudProgress, setCloudProgress] = useState<AreaProgressSnapshot[]>([]);
   
   // Real Login & Authentication States
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(false);
   const [showLoginModal, setShowLoginModal] = useState<boolean>(false);
   const [showChangePasswordModal, setShowChangePasswordModal] = useState<boolean>(false);
 
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      if (user) {
-        // user authenticated via Firebase auth if needed
-      }
-    });
-    return () => unsubscribe();
-  }, []);
-
-  
   // Login form state
   const [loginIdentifier, setLoginIdentifier] = useState<string>('');
   const [loginPassword, setLoginPassword] = useState<string>('');
   const [showLoginPassword, setShowLoginPassword] = useState<boolean>(false);
   const [loginError, setLoginError] = useState<string>('');
+  const [loginInfo, setLoginInfo] = useState<string>('');
 
   // Change password form state
   const [currentPasswordInput, setCurrentPasswordInput] = useState<string>('');
@@ -371,204 +401,116 @@ export default function App() {
   const [catalogSearchTerm, setCatalogSearchTerm] = useState('');
 
   useEffect(() => {
-    // 1. Ensure user document exists if logged in (isolated effect so listeners are not restarted)
-    if (isLoggedIn) {
-      const ensureUserDoc = async () => {
-        try {
-          const currentUid = auth.currentUser?.uid || currentSurveyorId || 'admin';
-          const userRef = doc(db, 'users', currentUid);
-          const userSnap = await getDoc(userRef);
-          if (!userSnap.exists()) {
-            await setDoc(userRef, {
-              uid: currentUid,
-              email: currentUser?.email || auth.currentUser?.email || 'admin@hethong.gov.vn',
-              displayName: currentUser?.name || auth.currentUser?.displayName || 'Quản trị viên',
-              role: (currentUser?.role?.toLowerCase() as any) || 'admin',
-              departmentId: currentUser?.departmentId || 'pb_tkth',
-              assignedAreaCodes: currentUser?.assignedAreas || ['ALL'],
-              updatedAt: new Date().toISOString()
-            });
-          }
-        } catch (err) {
-          console.warn('User profile sync warning:', err);
-        }
-      };
-      ensureUserDoc();
-    }
-  }, [isLoggedIn, currentSurveyorId]);
-
-  // 2. Setup listeners once on mount - keeps connections active so login and tab switches are instantaneous
-  useEffect(() => {
-    const unsubCommunes = onSnapshot(collection(db, 'communes'), (snapshot) => {
-      const existingComs: Commune[] = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Commune));
-      if (snapshot.empty || existingComs.length === 0) {
-        setCommunes(OFFICIAL_COMMUNES_CATALOG);
-        try { localStorage.setItem('cached_communes', JSON.stringify(OFFICIAL_COMMUNES_CATALOG)); } catch (e) {}
-      } else {
-        const map = new Map<string, Commune>();
-        existingComs.forEach(c => {
-          const oc = OFFICIAL_COMMUNES_CATALOG.find(item => item.communeCode === c.communeCode || item.id === c.id);
-          if (oc) {
-            const updatedCommune: Commune = {
-              ...c,
-              tkcsCode: oc.tkcsCode,
-              tkcsName: oc.tkcsName,
-              communeName: oc.communeName || c.communeName,
-              bkNongLamThuySan: oc.bkNongLamThuySan,
-              bkCongNghiepXayDung: oc.bkCongNghiepXayDung,
-              bkThuongMaiDichVu: oc.bkThuongMaiDichVu,
-              bkThuKhacLuong: oc.bkThuKhacLuong,
-              bkTongSo: oc.bkTongSo,
-              ttNongLamThuySan: oc.ttNongLamThuySan,
-              ttCongNghiepXayDung: oc.ttCongNghiepXayDung,
-              ttThuongMaiDichVu: oc.ttThuongMaiDichVu,
-              ttThuKhacLuong: oc.ttThuKhacLuong,
-              ttTongSo: oc.ttTongSo,
-              mauNongLamThuySan: oc.mauNongLamThuySan,
-              mauCongNghiepXayDung: oc.mauCongNghiepXayDung,
-              mauThuongMaiDichVu: oc.mauThuongMaiDichVu,
-              mauThuKhacLuong: oc.mauThuKhacLuong,
-              mauTongSo: oc.mauTongSo,
-              targetTotalHH: oc.targetTotalHH,
-              targetOfficialHH: oc.targetOfficialHH,
-              sectorTargets: oc.sectorTargets,
-            };
-            if (c.bkTongSo !== oc.bkTongSo || c.bkNongLamThuySan !== oc.bkNongLamThuySan) {
-              safeFirestoreWrite(async () => {
-                await setDoc(doc(db, 'communes', c.id), updatedCommune, { merge: true });
-              });
-            }
-            map.set(oc.communeCode || c.communeCode || c.id, updatedCommune);
-          } else {
-            map.set(c.communeCode || c.id, c);
-          }
-        });
-        OFFICIAL_COMMUNES_CATALOG.forEach(oc => {
-          if (!map.has(oc.communeCode)) {
-            map.set(oc.communeCode, oc);
-          }
-        });
-        const merged = Array.from(map.values());
-        setCommunes(merged);
-        try { localStorage.setItem('cached_communes', JSON.stringify(merged)); } catch (e) {}
-      }
-    }, (err) => {
-      console.warn("Firestore communes warning:", err);
-      setCommunes(OFFICIAL_COMMUNES_CATALOG);
-    });
-
-    const unsubAreas = onSnapshot(collection(db, 'surveyAreas'), (snapshot) => {
-      const ars: SurveyArea[] = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as SurveyArea));
-      if (ars.length > 0) {
-        setAreas(ars);
-        try { localStorage.setItem('cached_areas', JSON.stringify(ars)); } catch (e) {}
-      }
-    }, (err) => {
-      console.warn("Firestore areas warning:", err);
-    });
-
-    const unsubSurveyors = onSnapshot(collection(db, 'surveyors'), (snapshot) => {
-      const existingSurs: Surveyor[] = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Surveyor));
-      setSurveyors(prev => {
-        const map = new Map<string, Surveyor>();
-        const adminUser = existingSurs.find(s => s.id === 'admin' || s.code === 'ADMIN') || DEFAULT_SURVEYORS[0];
-        map.set(adminUser.id, adminUser);
-
-        OFFICIAL_PERSONNEL_LIST.forEach(op => {
-          map.set(op.id, op);
-        });
-
-        existingSurs.forEach(s => {
-          map.set(s.id, s);
-        });
-
-        prev.forEach(s => {
-          map.set(s.id, s);
-        });
-
-        const combined = Array.from(map.values());
-        try { localStorage.setItem('cached_surveyors', JSON.stringify(combined)); } catch (e) {}
-        return combined;
-      });
-    }, (err) => {
-      console.warn("Firestore surveyors warning:", err);
+    let cancelled = false;
+    const initializeLocalData = async () => {
       try {
-        const cached = localStorage.getItem('cached_surveyors');
-        if (cached) {
-          const parsed = JSON.parse(cached);
-          if (Array.isArray(parsed) && parsed.length > 0) {
-            setSurveyors(parsed);
-            return;
-          }
+        const snapshot = await loadLocalDataSnapshot();
+        if (cancelled) return;
+        if (snapshot) {
+          setCommunes(snapshot.communes);
+          setAreas(snapshot.areas);
+          setHouseholds(snapshot.households);
+          setSurveyors(snapshot.surveyors);
+          setDepartments(snapshot.departments);
+        } else {
+          await saveLocalDataSnapshot({ communes, areas, households, surveyors, departments });
         }
-      } catch (e) {}
-      setSurveyors([DEFAULT_SURVEYORS[0], ...OFFICIAL_PERSONNEL_LIST]);
-    });
-
-    // Households are stored 100% locally on device (localStorage / state) for maximum speed
-    try {
-      const cachedHhs = localStorage.getItem('cached_households');
-      if (cachedHhs) {
-        const parsed: Household[] = JSON.parse(cachedHhs);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          // Auto-repair: Tự động phát hiện và khôi phục các hộ bị gắn nhầm "DỰ PHÒNG" do địa chỉ có chữ TDP (Tổ dân phố)
-          let hasRepair = false;
-          const areaGroups: { [areaId: string]: Household[] } = {};
-          parsed.forEach(h => {
-            const aId = h.areaId || 'UNKNOWN';
-            if (!areaGroups[aId]) areaGroups[aId] = [];
-            areaGroups[aId].push(h);
+        localStorage.removeItem('cached_households');
+      } catch (err) {
+        console.error('Không thể mở kho dữ liệu cục bộ:', err);
+        if (!cancelled) {
+          setNotification({
+            type: 'error',
+            message: 'Không mở được kho dữ liệu cục bộ. Hãy dùng trình duyệt hỗ trợ IndexedDB và không xóa dữ liệu trang web.'
           });
-
-          Object.values(areaGroups).forEach(areaHhs => {
-            const officialCount = areaHhs.filter(h => h.sampleStatus === 'CHÍNH THỨC' || !h.sampleStatus).length;
-            const reserveCount = areaHhs.filter(h => (h.sampleStatus || '').toUpperCase().includes('DỰ PHÒNG')).length;
-            // Nếu địa bàn bị lệch (ví dụ 8 chính thức, 6 dự phòng mà tổng hộ >= 10)
-            if (officialCount < 10 && reserveCount > 4) {
-              areaHhs.forEach((h, idx) => {
-                const sttNum = Number(h.sttMau) || (idx + 1);
-                const isTdp = (h.address || '').toUpperCase().includes('TDP') || (h.address || '').toUpperCase().includes('TỔ DÂN PHỐ');
-                if (sttNum <= 10 && (h.sampleStatus || '').toUpperCase().includes('DỰ PHÒNG') && isTdp) {
-                  h.sampleStatus = 'CHÍNH THỨC';
-                  hasRepair = true;
-                }
-              });
-            }
-          });
-
-          if (hasRepair) {
-            try { localStorage.setItem('cached_households', JSON.stringify(parsed)); } catch (e) {}
-          }
-          setHouseholds(parsed);
+        }
+      } finally {
+        if (!cancelled) {
+          setLocalDataReady(true);
+          setLoading(false);
         }
       }
-    } catch (e) {}
-    setLoading(false);
-
-    const unsubDepartments = onSnapshot(collection(db, 'departments'), (snapshot) => {
-      const existingDepts: Department[] = snapshot.docs.map(d => ({ id: d.id, ...d.data() } as Department));
-      if (snapshot.empty || existingDepts.length === 0) {
-        seedDepartmentsIfEmpty().then(depts => {
-          setDepartments(depts);
-          try { localStorage.setItem('cached_departments', JSON.stringify(depts)); } catch (e) {}
-        });
-      } else {
-        setDepartments(existingDepts);
-        try { localStorage.setItem('cached_departments', JSON.stringify(existingDepts)); } catch (e) {}
-      }
-    }, (err) => {
-      console.warn("Firestore departments warning:", err);
-      const cached = localStorage.getItem('cached_departments');
-      if (cached) setDepartments(JSON.parse(cached));
-      else setDepartments(OFFICIAL_5_DEPARTMENTS);
-    });
-
-    return () => {
-      unsubCommunes();
-      unsubAreas();
-      unsubSurveyors();
-      unsubDepartments();
     };
+    void initializeLocalData();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!localDataReady) return;
+    void saveLocalDataSnapshot({ communes, areas, households, surveyors, departments })
+      .catch(err => {
+        console.error('Không thể lưu dữ liệu nghiệp vụ trên thiết bị:', err);
+        setNotification({
+          type: 'error',
+          message: 'Không lưu được dữ liệu vào kho cục bộ của trình duyệt. Hãy xuất bản sao lưu và kiểm tra dung lượng thiết bị.'
+        });
+      });
+    try {
+      localStorage.setItem('cached_communes', JSON.stringify(communes));
+      localStorage.setItem('cached_areas', JSON.stringify(areas));
+      localStorage.setItem('cached_surveyors', JSON.stringify(surveyors));
+      localStorage.setItem('cached_departments', JSON.stringify(departments));
+    } catch (err) {
+      console.error('Không thể cập nhật bộ nhớ đệm tương thích:', err);
+    }
+  }, [localDataReady, communes, areas, households, surveyors, departments]);
+
+  useEffect(() => {
+    const repairedHouseholds = households.map(household => ({ ...household }));
+    const householdsByArea = new Map<string, Household[]>();
+    repairedHouseholds.forEach(household => {
+      const areaId = household.areaId || 'UNKNOWN';
+      const group = householdsByArea.get(areaId) || [];
+      group.push(household);
+      householdsByArea.set(areaId, group);
+    });
+
+    let hasRepair = false;
+    householdsByArea.forEach(areaHouseholds => {
+      const officialCount = areaHouseholds.filter(h =>
+        h.sampleStatus === 'CHÍNH THỨC' || !h.sampleStatus
+      ).length;
+      const reserveCount = areaHouseholds.filter(h =>
+        (h.sampleStatus || '').toUpperCase().includes('DỰ PHÒNG')
+      ).length;
+      if (officialCount < 10 && reserveCount > 4) {
+        areaHouseholds.forEach((household, index) => {
+          const sampleNumber = Number(household.sttMau) || index + 1;
+          const address = (household.address || '').toUpperCase();
+          const isUrbanNeighborhood = address.includes('TDP') || address.includes('TỔ DÂN PHỐ');
+          if (sampleNumber <= 10 && isUrbanNeighborhood &&
+            (household.sampleStatus || '').toUpperCase().includes('DỰ PHÒNG')) {
+            household.sampleStatus = 'CHÍNH THỨC';
+            hasRepair = true;
+          }
+        });
+      }
+    });
+
+    if (hasRepair) setHouseholds(repairedHouseholds);
+  }, [households]);
+
+  useEffect(() => {
+    const unsubscribe = onSnapshot(collection(db, 'areaProgress'), snapshot => {
+      const progress = snapshot.docs.map(document => document.data() as AreaProgressSnapshot)
+        .filter(item =>
+          typeof item.id === 'string' &&
+          typeof item.areaId === 'string' &&
+          typeof item.totalHouseholds === 'number' &&
+          typeof item.completedHouseholds === 'number' &&
+          typeof item.inProgressHouseholds === 'number'
+        );
+      setCloudProgress(progress);
+    }, err => {
+      console.error('Không thể đọc số đếm tiến độ từ Firebase:', err);
+      setNotification({
+        type: 'error',
+        message: 'Không tải được tiến độ từ Firebase. Dữ liệu bảng kê và phiếu cục bộ vẫn được giữ nguyên.'
+      });
+    });
+    return () => unsubscribe();
   }, []);
 
   const currentUser: Surveyor = useMemo(() => {
@@ -1063,13 +1005,11 @@ export default function App() {
         tkcsName: updated.tkcsName
       } : h));
 
-      await setDoc(doc(db, 'communes', updated.id), updated, { merge: true });
-
       setEditingCommune(null);
-      showNotification('success', `Đã cập nhật xã [${updated.communeCode}] ${updated.communeName} và đồng bộ lên Firebase.`);
+      showNotification('success', `Đã cập nhật xã [${updated.communeCode}] ${updated.communeName} trên máy này.`);
     } catch (err) {
       console.error(err);
-      showNotification('error', 'Lỗi lưu thông tin xã lên Firebase.');
+      showNotification('error', 'Lỗi cập nhật thông tin xã trên máy này.');
     }
   };
 
@@ -1098,7 +1038,6 @@ export default function App() {
 
     try {
       setCommunes(prev => [...prev, newCommune]);
-      await setDoc(doc(db, 'communes', newCommune.id), newCommune);
       setSelectedCatalogCommuneId(newCommune.id);
       setFormCommuneCode(newCommune.communeCode);
       setFormCommuneName(newCommune.communeName);
@@ -1106,10 +1045,10 @@ export default function App() {
       setFormTkcsName(newCommune.tkcsName);
       setIsAddCommuneModalOpen(false);
       setNewCommuneForm({ communeCode: '', communeName: '', tkcsCode: '', tkcsName: '' });
-      showNotification('success', `Đã thêm xã [${newCommune.communeCode}] ${newCommune.communeName} vào Danh mục xã và lưu cố định trên Firebase.`);
+      showNotification('success', `Đã thêm xã [${newCommune.communeCode}] ${newCommune.communeName} vào danh mục trên máy này.`);
     } catch (err) {
       console.error(err);
-      showNotification('error', 'Lỗi lưu xã mới lên Firebase.');
+      showNotification('error', 'Lỗi lưu xã mới trên máy này.');
     }
   };
 
@@ -1123,12 +1062,6 @@ export default function App() {
       setCommunes(merged);
       try { localStorage.setItem('cached_communes', JSON.stringify(merged)); } catch (e) {}
 
-      const batch = writeBatch(db);
-      communesList.forEach(c => {
-        batch.set(doc(db, 'communes', c.id), c, { merge: true });
-      });
-      await batch.commit();
-
       if (communesList.length > 0) {
         setSelectedCatalogCommuneId(communesList[0].id);
         setFormCommuneCode(communesList[0].communeCode);
@@ -1137,10 +1070,10 @@ export default function App() {
         setFormTkcsName(communesList[0].tkcsName);
       }
 
-      showNotification('success', `Đã lưu cố định ${communesList.length} xã vào Danh mục xã và đồng bộ tức thời trên Firebase!`);
+      showNotification('success', `Đã lưu ${communesList.length} xã vào danh mục trên máy này.`);
     } catch (err) {
       console.error(err);
-      showNotification('error', 'Lỗi đồng bộ danh mục xã lên Firebase.');
+      showNotification('error', 'Lỗi lưu danh mục xã trên máy này.');
     }
   };
 
@@ -1213,29 +1146,13 @@ export default function App() {
 
       showNotification('success', `Đã cập nhật thông tin xã [${updatedCommuneCode}] ${updatedCommuneName} thành công.`);
 
-      // Update Firestore in background
-      setTimeout(async () => {
-        try {
-          const batch = writeBatch(db);
-          batch.update(doc(db, 'communes', targetId), {
-            communeName: updatedCommuneName,
-            communeCode: updatedCommuneCode,
-            tkcsCode: updatedTkcsCode,
-            tkcsName: updatedTkcsName
-          });
-          await batch.commit();
-        } catch (err) {
-          console.warn("Firestore update metadata warning:", err);
-        }
-      }, 50);
-
     } catch (err) {
       console.error(err);
       showNotification('error', 'Có lỗi khi cập nhật thông tin.');
     }
   };
 
-  // Helper to commit imported data to State, LocalStorage and Firebase
+  // Save imported data to state and local browser storage.
   const executeFinalizeImport = async (
     communeData: Commune,
     areasData: SurveyArea[],
@@ -1245,7 +1162,7 @@ export default function App() {
     isOverwrite: boolean,
     oldCommuneIdsToRemove: string[] = []
   ) => {
-    setUploadProgressText(`Đang lưu ${totalCount} hộ từ ${areasData.length} địa bàn lên cơ sở dữ liệu...`);
+    setUploadProgressText(`Đang lưu cục bộ ${totalCount} hộ từ ${areasData.length} địa bàn...`);
 
     // Ensure all matching old commune IDs by ID, code, or name are collected if isOverwrite
     const allIdsToRemove = new Set(oldCommuneIdsToRemove);
@@ -1267,45 +1184,7 @@ export default function App() {
       communeCode: a.communeCode || communeData.communeCode
     }));
 
-    try {
-      // 1. Write to Firestore FIRST and await to ensure no race condition with onSnapshot
-      if (isOverwrite) {
-        const oldAreas = areas.filter(a => allIdsToRemove.has(a.communeId) || a.communeId === communeData.id);
-        const oldHhs = households.filter(h => 
-          allIdsToRemove.has(h.communeId) || 
-          h.communeId === communeData.id || 
-          (communeData.communeCode && h.communeCode && h.communeCode.trim().toLowerCase() === communeData.communeCode.trim().toLowerCase()) ||
-          (communeData.communeName && h.communeName && h.communeName.trim().toLowerCase() === communeData.communeName.trim().toLowerCase())
-        );
-        const toDeleteRefs = [
-          ...Array.from(allIdsToRemove).map(id => doc(db, 'communes', id)),
-          ...oldAreas.map(a => doc(db, 'surveyAreas', a.id))
-        ];
-
-        for (let i = 0; i < toDeleteRefs.length; i += 300) {
-          const chunk = toDeleteRefs.slice(i, i + 300);
-          const batch = writeBatch(db);
-          chunk.forEach(r => batch.delete(r));
-          await batch.commit();
-        }
-      }
-
-      const allDocs = [
-        { ref: doc(db, 'communes', communeData.id), data: communeData },
-        ...preparedAreasData.map(a => ({ ref: doc(db, 'surveyAreas', a.id), data: a }))
-      ];
-
-      for (let i = 0; i < allDocs.length; i += 300) {
-        const chunk = allDocs.slice(i, i + 300);
-        const batch = writeBatch(db);
-        chunk.forEach(item => batch.set(item.ref, item.data));
-        await batch.commit();
-      }
-    } catch (bgErr) {
-      console.warn("Firebase sync error during import:", bgErr);
-    }
-
-    // 2. Then Update State & LocalStorage immediately after successful DB write
+    // Update state; a shared effect persists each collection locally.
     setCommunes(prev => {
       let next: Commune[];
       if (isOverwrite) {
@@ -1361,13 +1240,13 @@ export default function App() {
         skippedSheets: skippedSheetsList
       });
       showNotification('success', isOverwrite 
-        ? `Đã GHI ĐÈ thành công xã [${communeData.communeCode}] ${communeData.communeName}: ${totalCount} hộ (${areasData.length} địa bàn) và đồng bộ xong lên Firebase!`
-        : `Đã nạp thành công ${totalCount} hộ (${areasData.length} địa bàn) và đồng bộ xong lên Firebase!`
+        ? `Đã ghi đè cục bộ xã [${communeData.communeCode}] ${communeData.communeName}: ${totalCount} hộ (${areasData.length} địa bàn).`
+        : `Đã nạp cục bộ ${totalCount} hộ (${areasData.length} địa bàn).`
       );
     } else {
       showNotification('success', isOverwrite 
-        ? `Đã GHI ĐÈ thành công dữ liệu xã [${communeData.communeCode}] ${communeData.communeName} (${areasData.length} địa bàn, ${totalCount} hộ) và đồng bộ xong lên Firebase!`
-        : `Đã import thành công ${totalCount} hộ và đồng bộ xong lên Firebase!`
+        ? `Đã ghi đè cục bộ dữ liệu xã [${communeData.communeCode}] ${communeData.communeName} (${areasData.length} địa bàn, ${totalCount} hộ).`
+        : `Đã nhập cục bộ ${totalCount} hộ.`
       );
     }
   };
@@ -1551,23 +1430,6 @@ export default function App() {
     setIsDeleting(false);
     setDeleteProgressText('');
 
-    setTimeout(async () => {
-      try {
-        const allDeletions = [
-          ...communesToRemoveIds.map(id => doc(db, 'communes', id)),
-          ...areasToRemoveIds.map(id => doc(db, 'surveyAreas', id)),
-          ...householdsToRemoveIds.map(id => doc(db, 'households', id))
-        ];
-        for (let i = 0; i < allDeletions.length; i += 300) {
-          const chunk = allDeletions.slice(i, i + 300);
-          const batch = writeBatch(db);
-          chunk.forEach(r => batch.delete(r));
-          await batch.commit();
-        }
-      } catch (e) {
-        console.warn("Background deduplication Firestore cleanup warning:", e);
-      }
-    }, 100);
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2792,6 +2654,65 @@ export default function App() {
     return false;
   };
 
+  useEffect(() => {
+    if (currentUser.role !== 'SURVEYOR' || !isLoggedIn) return;
+
+    const syncProgress = () => {
+      const assignedAreas = areas.filter(area =>
+        isAreaAssigned(area, currentUser.assignedAreas || []) ||
+        households.some(h =>
+          h.assignedSurveyorId === currentUser.id &&
+          (h.areaId === area.id ||
+            (h.areaCode === area.code && (
+              h.communeId === area.communeId ||
+              h.communeCode === area.communeCode
+            )))
+        )
+      );
+      const snapshots = assignedAreas.map(area => {
+        const commune = communes.find(c =>
+          c.id === area.communeId || c.communeCode === area.communeCode
+        );
+        if (!commune) return null;
+        const assignedHouseholds = households.filter(h =>
+          h.areaId === area.id ||
+          (h.areaCode === area.code && (
+            h.communeId === area.communeId ||
+            h.communeCode === commune.communeCode
+          ))
+        ).filter(h =>
+          h.assignedSurveyorId
+            ? h.assignedSurveyorId === currentUser.id
+            : !h.assignedSurveyorName || h.assignedSurveyorName === currentUser.name
+        );
+        return createAreaProgressSnapshot(
+          currentUser.id,
+          currentUser.name,
+          area,
+          commune,
+          assignedHouseholds
+        );
+      }).filter((item): item is AreaProgressSnapshot => item !== null);
+
+      Promise.all(snapshots.map(snapshot =>
+        setDoc(doc(db, 'areaProgress', snapshot.id), snapshot)
+      )).catch(err => {
+        console.error('Không thể đồng bộ số đếm tiến độ lên Firebase:', err);
+        setNotification({
+          type: 'error',
+          message: 'Không đồng bộ được tiến độ lên Firebase. Phiếu vẫn được lưu trên máy này.'
+        });
+      });
+    };
+
+    const timer = window.setTimeout(syncProgress, 400);
+    window.addEventListener('online', syncProgress);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener('online', syncProgress);
+    };
+  }, [areas, communes, households, currentUser, isLoggedIn]);
+
   // Danh sách xã thuộc phạm vi Tổng hợp nhanh đang xem
   const tnhScopeCommunes = useMemo(() => {
     let result = communes;
@@ -3248,16 +3169,383 @@ export default function App() {
     showNotification('success', `Đã lưu phiếu Phụ lục II của hộ "${updatedHousehold.householdHead}" thành công.`);
   };
 
+  const handleExportLocalBackup = () => {
+    try {
+      const snapshot = { communes, areas, households, surveyors, departments };
+      downloadLocalBackup(snapshot, `Sao_Luu_Bang_Ke_${new Date().toISOString().slice(0, 10)}.json`);
+      showNotification('success', `Đã xuất bản sao lưu cục bộ gồm ${communes.length} xã, ${areas.length} địa bàn và ${households.length} hộ.`);
+    } catch (err) {
+      showNotification('error', `Không thể xuất bản sao lưu: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const handleExportPreRestoreBackup = async () => {
+    try {
+      const snapshot = await loadPreRestoreSnapshot();
+      if (!snapshot) {
+        showNotification('error', 'Chưa có bản sao lưu trước lần khôi phục nào trên thiết bị này.');
+        return;
+      }
+      downloadLocalBackup(snapshot, `Sao_Luu_Truoc_Khoi_Phu_${new Date().toISOString().slice(0, 10)}.json`);
+      showNotification('success', `Đã tải bản dự phòng gồm ${snapshot.households.length} hộ.`);
+    } catch (err) {
+      showNotification('error', `Không thể tải bản dự phòng: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const downloadLocalBackup = (snapshot: {
+    communes: Commune[];
+    areas: SurveyArea[];
+    households: Household[];
+    surveyors: Surveyor[];
+    departments: Department[];
+  }, fileName: string) => {
+    const blob = new Blob([serializeLocalDataBackup(snapshot)], {
+      type: 'application/json;charset=utf-8'
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const handleRestoreLocalBackup = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (currentUser.role !== 'ADMIN') {
+      showNotification('error', 'Chỉ tài khoản Admin được khôi phục toàn bộ dữ liệu cục bộ.');
+      event.target.value = '';
+      return;
+    }
+
+    try {
+      const parsed: unknown = JSON.parse(await file.text());
+      const restored = parseLocalDataBackup(parsed, surveyors, departments);
+      if (restored.households.length === 0 || restored.areas.length === 0) {
+        throw new Error('Bản sao lưu không có hộ hoặc địa bàn; dữ liệu hiện tại chưa bị thay đổi.');
+      }
+      const confirmed = window.confirm(
+        `Khôi phục ${file.name}?\n\n` +
+        `Trong file: ${restored.communes.length} xã, ${restored.areas.length} địa bàn, ${restored.households.length} hộ.\n` +
+        `Hiện tại: ${communes.length} xã, ${areas.length} địa bàn, ${households.length} hộ.\n\n` +
+        `Dữ liệu hiện tại sẽ được lưu thành bản dự phòng cục bộ trước khi thay thế.`
+      );
+      if (!confirmed) return;
+
+      await saveLocalDataSnapshot(
+        restored,
+        { communes, areas, households, surveyors, departments }
+      );
+      setCommunes(restored.communes);
+      setAreas(restored.areas);
+      setHouseholds(restored.households);
+      setSurveyors(restored.surveyors);
+      setDepartments(restored.departments);
+      setSelectedCommuneId('ALL');
+      setSelectedAreaId('ALL');
+      setCurrentPage(1);
+      showNotification(
+        'success',
+        `Đã khôi phục ${restored.communes.length} xã, ${restored.areas.length} địa bàn và ${restored.households.length} hộ trên máy này.`
+      );
+    } catch (err) {
+      showNotification('error', `Không thể khôi phục bản sao lưu: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      event.target.value = '';
+    }
+  };
+
+  const handleApplyWorkPackage = async (workPackage: SurveyWorkPackage) => {
+    if (workPackage.purpose === 'ASSIGNMENT') {
+      if (currentUser.role !== 'SURVEYOR') {
+        throw new Error('Chỉ tài khoản điều tra viên mới được nạp gói phân công.');
+      }
+      const entries = workPackage.entries.filter(entry => entry.surveyorId === currentUser.id);
+      if (entries.length === 0) {
+        throw new Error('Gói JSON không có địa bàn được phân công cho tài khoản đang đăng nhập.');
+      }
+      const importedProfile = workPackage.surveyors?.find(profile => profile.id === currentUser.id);
+      if (importedProfile && importedProfile.status !== 'ACTIVE') {
+        throw new Error('Tài khoản trong gói phân công đang bị khóa hoặc ngừng hoạt động.');
+      }
+
+      const nextCommunes = [...communes];
+      const nextAreas = [...areas];
+      const nextHouseholds = [...households];
+      const assignedAreaIds = new Set(currentUser.assignedAreas || []);
+      let assignmentUpdatedCount = 0;
+      let assignmentNewCount = 0;
+
+      entries.forEach(entry => {
+        const communeIndex = nextCommunes.findIndex(commune =>
+          commune.id === entry.commune.id ||
+          (commune.communeCode && commune.communeCode === entry.commune.communeCode)
+        );
+        const commune = communeIndex >= 0
+          ? { ...nextCommunes[communeIndex], ...entry.commune, id: nextCommunes[communeIndex].id }
+          : entry.commune;
+        if (communeIndex >= 0) nextCommunes[communeIndex] = commune;
+        else nextCommunes.push(commune);
+
+        const areaIndex = nextAreas.findIndex(area =>
+          area.id === entry.area.id ||
+          (area.code === entry.area.code && (
+            area.communeId === commune.id ||
+            area.communeCode === commune.communeCode
+          ))
+        );
+        const area = areaIndex >= 0
+          ? { ...nextAreas[areaIndex], ...entry.area, id: nextAreas[areaIndex].id, communeId: commune.id }
+          : { ...entry.area, communeId: commune.id };
+        if (areaIndex >= 0) nextAreas[areaIndex] = area;
+        else nextAreas.push(area);
+        assignedAreaIds.add(area.id);
+
+        entry.households.forEach(incoming => {
+          if (incoming.assignedSurveyorId && incoming.assignedSurveyorId !== currentUser.id) {
+            throw new Error(`Hộ ${incoming.sttMau || incoming.id} trong gói đang được phân công cho ĐTV khác.`);
+          }
+          const belongsToEntry = incoming.areaId === entry.area.id ||
+            (incoming.areaCode === entry.area.code && (
+              incoming.communeId === entry.commune.id ||
+              incoming.communeCode === entry.commune.communeCode
+            ));
+          if (!belongsToEntry) {
+            throw new Error(`Hộ ${incoming.sttMau || incoming.id} không thuộc địa bàn ${entry.area.code}.`);
+          }
+
+          const householdIndex = nextHouseholds.findIndex(existing =>
+            existing.id === incoming.id ||
+            (existing.communeCode === incoming.communeCode &&
+              existing.areaCode === incoming.areaCode &&
+              existing.sttMau === incoming.sttMau)
+          );
+          const existing = householdIndex >= 0 ? nextHouseholds[householdIndex] : undefined;
+          const household: Household = {
+            ...existing,
+            ...incoming,
+            id: existing?.id || incoming.id,
+            communeId: commune.id,
+            areaId: area.id,
+            assignedSurveyorId: currentUser.id,
+            assignedSurveyorName: currentUser.name,
+            questionnaire: existing?.questionnaire || incoming.questionnaire,
+            surveyStatus: existing?.surveyStatus || incoming.surveyStatus,
+            updatedAt: existing?.updatedAt || incoming.updatedAt,
+            updatedBy: existing?.updatedBy || incoming.updatedBy
+          };
+          if (householdIndex >= 0) {
+            nextHouseholds[householdIndex] = household;
+            assignmentUpdatedCount++;
+          } else {
+            nextHouseholds.push(household);
+            assignmentNewCount++;
+          }
+        });
+      });
+
+      const updatedSurveyor = {
+        ...currentUser,
+        ...(importedProfile || {}),
+        password: currentUser.password,
+        mustChangePassword: currentUser.mustChangePassword,
+        assignedAreas: Array.from(assignedAreaIds)
+      };
+      const nextSurveyors = surveyors.map(surveyor =>
+        surveyor.id === currentUser.id ? updatedSurveyor : surveyor
+      );
+      setCommunes(nextCommunes);
+      setAreas(nextAreas);
+      setHouseholds(nextHouseholds);
+      setSurveyors(nextSurveyors);
+      localStorage.setItem('cached_communes', JSON.stringify(nextCommunes));
+      localStorage.setItem('cached_areas', JSON.stringify(nextAreas));
+      localStorage.setItem('cached_surveyors', JSON.stringify(nextSurveyors));
+      return {
+        updatedCount: assignmentUpdatedCount,
+        newCount: assignmentNewCount,
+        areaCount: entries.length,
+        progressSynced: true
+      };
+    }
+
+    if (currentUser.role === 'SURVEYOR') {
+      throw new Error('Điều tra viên không được nạp gói kết quả.');
+    }
+
+    const nextHouseholds = [...households];
+    const processedAreas: { area: SurveyArea; commune: Commune; surveyorId: string; surveyorName: string }[] = [];
+    let updatedCount = 0;
+    const userDepartment = departments.find(department =>
+      department.id === currentUser.departmentId || department.name === currentUser.department
+    );
+    for (const entry of workPackage.entries) {
+      const localArea = areas.find(area =>
+        area.id === entry.area.id ||
+        (area.code === entry.area.code && (
+          area.communeId === entry.commune.id ||
+          area.communeCode === entry.commune.communeCode
+        ))
+      );
+      const localCommune = communes.find(commune =>
+        commune.id === entry.commune.id ||
+        commune.communeCode === entry.commune.communeCode
+      );
+      if (!localArea || !localCommune) {
+        throw new Error(`Không tìm thấy địa bàn ${entry.area.code} trong bảng kê máy quản lý. Hãy nạp đúng gói phân công gốc trước.`);
+      }
+      if (currentUser.role !== 'ADMIN') {
+        const assignedAreaKeys = [
+          ...(currentUser.assignedAreas || []),
+          ...(userDepartment?.assignedAreaCodes || [])
+        ];
+        const assignedCommuneKeys = currentUser.assignedCommunes || [];
+        const hasSupervisorScope = currentUser.role === 'SUPERVISOR' && (
+          (currentUser.assignedAreas || []).some(key => key !== 'ALL') ||
+          (userDepartment?.assignedAreaCodes || []).some(key => key !== 'ALL') ||
+          assignedCommuneKeys.some(key => key !== 'ALL')
+        );
+        const isAllowed = currentUser.role === 'SUPERVISOR' && !hasSupervisorScope
+          ? true
+          : isAreaAssigned(localArea, assignedAreaKeys) ||
+            (currentUser.role === 'SUPERVISOR' && (
+              assignedCommuneKeys.includes(localCommune.id) ||
+              assignedCommuneKeys.includes(localCommune.communeCode)
+            ));
+        if (!isAllowed) {
+          throw new Error(`Tài khoản hiện tại không có quyền nạp kết quả địa bàn ${localArea.code}.`);
+        }
+      }
+      if (!surveyors.some(surveyor =>
+        surveyor.id === entry.surveyorId && surveyor.role === 'SURVEYOR'
+      )) {
+        throw new Error(`Không tìm thấy ĐTV ${entry.surveyorName} trong danh sách máy quản lý.`);
+      }
+
+      for (const incoming of entry.households) {
+        const hasSurveyData =
+          incoming.surveyStatus === 'DANG_NHAP' ||
+          incoming.surveyStatus === 'DA_HOAN_THANH' ||
+          incoming.surveyStatus === 'DA_DUYET' ||
+          Boolean(incoming.questionnaire && (
+            incoming.questionnaire.muc1_has ||
+            incoming.questionnaire.muc2_has ||
+            incoming.questionnaire.muc3_has ||
+            incoming.questionnaire.muc4_has ||
+            incoming.questionnaire.muc5_has ||
+            incoming.questionnaire.muc6_has ||
+            incoming.questionnaire.muc7_has ||
+            incoming.questionnaire.muc1_rows?.length ||
+            incoming.questionnaire.muc2_cayTrongRows?.length ||
+            incoming.questionnaire.muc6_rows?.length
+          )) ||
+          Boolean(incoming.note?.trim());
+        if (!hasSurveyData) continue;
+        const belongsToEntry = incoming.areaId === entry.area.id ||
+          (incoming.areaCode === entry.area.code && (
+            incoming.communeId === entry.commune.id ||
+            incoming.communeCode === entry.commune.communeCode
+          ));
+        if (!belongsToEntry) {
+          throw new Error(`Hộ ${incoming.sttMau || incoming.id} không thuộc địa bàn ${entry.area.code} trong gói kết quả.`);
+        }
+
+        const householdIndex = nextHouseholds.findIndex(existing =>
+          existing.id === incoming.id ||
+          (existing.communeCode === incoming.communeCode &&
+            existing.areaCode === incoming.areaCode &&
+            existing.sttMau === incoming.sttMau)
+        );
+        if (householdIndex < 0) {
+          throw new Error(`Không khớp được hộ ${incoming.sttMau || incoming.id} trong bảng kê địa bàn ${localArea.code}.`);
+        }
+        const existing = nextHouseholds[householdIndex];
+        if (
+          existing.areaId !== localArea.id &&
+          !(existing.areaCode === localArea.code && (
+            existing.communeId === localCommune.id ||
+            existing.communeCode === localCommune.communeCode
+          ))
+        ) {
+          throw new Error(`Hộ ${incoming.sttMau || incoming.id} khớp với một địa bàn khác trong bảng kê.`);
+        }
+        if (
+          (existing.assignedSurveyorId && existing.assignedSurveyorId !== entry.surveyorId) ||
+          (!existing.assignedSurveyorId && existing.assignedSurveyorName &&
+            existing.assignedSurveyorName !== entry.surveyorName)
+        ) {
+          throw new Error(`Hộ ${existing.sttMau || existing.id} đang thuộc ĐTV khác với gói kết quả.`);
+        }
+        const incomingTime = Date.parse(incoming.updatedAt || workPackage.exportedAt);
+        const existingTime = Date.parse(existing.updatedAt || '');
+        if (Number.isFinite(existingTime) && Number.isFinite(incomingTime) && incomingTime < existingTime) {
+          continue;
+        }
+        nextHouseholds[householdIndex] = {
+          ...existing,
+          assignedSurveyorId: existing.assignedSurveyorId || entry.surveyorId,
+          assignedSurveyorName: existing.assignedSurveyorName || entry.surveyorName,
+          surveyStatus: incoming.surveyStatus || existing.surveyStatus,
+          questionnaire: incoming.questionnaire || existing.questionnaire,
+          updatedAt: incoming.updatedAt || workPackage.exportedAt,
+          updatedBy: incoming.updatedBy || entry.surveyorName,
+          note: incoming.note || existing.note
+        };
+        updatedCount++;
+      }
+      processedAreas.push({
+        area: localArea,
+        commune: localCommune,
+        surveyorId: entry.surveyorId,
+        surveyorName: entry.surveyorName
+      });
+    }
+
+    setHouseholds(nextHouseholds);
+    let progressSynced = true;
+    try {
+      const snapshots = processedAreas.map(item => createAreaProgressSnapshot(
+        item.surveyorId,
+        item.surveyorName,
+        item.area,
+        item.commune,
+        nextHouseholds.filter(h =>
+          h.areaId === item.area.id ||
+          (h.areaCode === item.area.code && (
+            h.communeId === item.commune.id ||
+            h.communeCode === item.commune.communeCode
+          ))
+        ).filter(h =>
+          h.assignedSurveyorId
+            ? h.assignedSurveyorId === item.surveyorId
+            : !h.assignedSurveyorName || h.assignedSurveyorName === item.surveyorName
+        )
+      ));
+      await Promise.all(snapshots.map(snapshot =>
+        setDoc(doc(db, 'areaProgress', snapshot.id), snapshot)
+      ));
+    } catch (err) {
+      console.error('Không thể đồng bộ số đếm tiến độ lên Firebase:', err);
+      progressSynced = false;
+    }
+    return {
+      updatedCount,
+      newCount: 0,
+      areaCount: processedAreas.length,
+      progressSynced
+    };
+  };
+
   const handleSaveSurveyor = async (surveyor: Surveyor) => {
     setSurveyors(prev => {
       const idx = prev.findIndex(s => s.id === surveyor.id);
       const next = idx >= 0 ? prev.map(s => s.id === surveyor.id ? surveyor : s) : [...prev, surveyor];
       try { localStorage.setItem('cached_surveyors', JSON.stringify(next)); } catch (e) {}
       return next;
-    });
-    
-    await safeFirestoreWrite(async () => {
-      await setDoc(doc(db, 'surveyors', surveyor.id), surveyor, { merge: true });
     });
   };
 
@@ -3266,10 +3554,6 @@ export default function App() {
       const next = prev.filter(s => s.id !== id);
       try { localStorage.setItem('cached_surveyors', JSON.stringify(next)); } catch (e) {}
       return next;
-    });
-    
-    await safeFirestoreWrite(async () => {
-      await deleteDoc(doc(db, 'surveyors', id));
     });
   };
 
@@ -3280,10 +3564,6 @@ export default function App() {
       try { localStorage.setItem('cached_departments', JSON.stringify(next)); } catch (e) {}
       return next;
     });
-    
-    await safeFirestoreWrite(async () => {
-      await setDoc(doc(db, 'departments', dept.id), dept);
-    });
   };
 
   const handleDeleteDepartment = async (id: string) => {
@@ -3291,10 +3571,6 @@ export default function App() {
       const next = prev.filter(d => d.id !== id);
       try { localStorage.setItem('cached_departments', JSON.stringify(next)); } catch (e) {}
       return next;
-    });
-    
-    await safeFirestoreWrite(async () => {
-      await deleteDoc(doc(db, 'departments', id));
     });
   };
 
@@ -3623,9 +3899,74 @@ export default function App() {
     return newHousehold;
   };
 
+  const handleImportAssignmentBeforeLogin = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    try {
+      const workPackage = parseSurveyWorkPackage(await file.text());
+      if (workPackage.purpose !== 'ASSIGNMENT') {
+        throw new Error('Chỉ có thể nạp gói phân công trước khi đăng nhập.');
+      }
+      const profiles = workPackage.surveyors || [];
+      const identifier = loginIdentifier.trim().toLowerCase();
+      const profile = profiles.find(item =>
+        item.id.toLowerCase() === identifier ||
+        item.code.toLowerCase() === identifier ||
+        item.username.toLowerCase() === identifier
+      ) || (profiles.length === 1 ? profiles[0] : undefined);
+      if (!profile) {
+        throw new Error('Không xác định được tài khoản trong gói. Hãy nhập tên đăng nhập trước hoặc yêu cầu Admin xuất đúng gói ĐTV.');
+      }
+      if (profile.status !== 'ACTIVE') {
+        throw new Error('Tài khoản trong gói đang bị khóa hoặc ngừng hoạt động.');
+      }
+      const entries = workPackage.entries.filter(entry => entry.surveyorId === profile.id);
+      if (entries.length === 0) {
+        throw new Error('Gói JSON không có địa bàn được giao cho tài khoản này.');
+      }
+
+      const existingUser = surveyors.find(item => item.id === profile.id);
+      if (existingUser?.status === 'LOCKED' || existingUser?.status === 'INACTIVE') {
+        throw new Error('Tài khoản hiện có trên máy đang bị khóa hoặc ngừng hoạt động.');
+      }
+      const assignedAreas = Array.from(new Set([
+        ...(existingUser?.assignedAreas || []),
+        ...entries.map(entry => entry.area.id)
+      ]));
+      const importedUser: Surveyor = {
+        ...(existingUser || {}),
+        ...profile,
+        id: profile.id,
+        role: 'SURVEYOR',
+        status: existingUser?.status || profile.status,
+        assignedAreas,
+        password: existingUser?.password,
+        mustChangePassword: existingUser?.mustChangePassword ?? true
+      };
+      const nextSurveyors = existingUser
+        ? surveyors.map(item => item.id === profile.id ? importedUser : item)
+        : [...surveyors, importedUser];
+      setSurveyors(nextSurveyors);
+      localStorage.setItem('cached_surveyors', JSON.stringify(nextSurveyors));
+      setLoginIdentifier(profile.username || profile.code);
+      setLoginError('');
+      setLoginInfo(existingUser
+        ? `Đã nạp phân quyền và ${entries.length} địa bàn cho ${profile.name}. Hãy đăng nhập bằng mật khẩu hiện có.`
+        : `Đã tạo tài khoản ${profile.name}. Mật khẩu khởi tạo: ${INITIAL_DEFAULT_PASSWORD}; hệ thống sẽ yêu cầu đổi mật khẩu sau khi đăng nhập.`
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setLoginInfo('');
+      setLoginError(`Không nạp được gói phân công: ${message}`);
+    }
+  };
+
   const handleLogin = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
     setLoginError('');
+    setLoginInfo('');
 
     const idInput = loginIdentifier.trim();
     const pwInput = loginPassword.trim();
@@ -3640,7 +3981,7 @@ export default function App() {
       return;
     }
 
-    // Find in live surveyors list loaded from Firestore
+    // Tài khoản và phân quyền được quản lý cục bộ trên thiết bị.
     const user = surveyors.find(s => 
       s.code.toLowerCase() === idInput.toLowerCase() ||
       (s.username && s.username.toLowerCase() === idInput.toLowerCase()) ||
@@ -3674,17 +4015,6 @@ export default function App() {
       localStorage.setItem('active_surveyor_id', user.id);
     } catch (e) {}
     
-    // Sync profile to Firestore collection 'users'
-    setDoc(doc(db, 'users', user.id), {
-      uid: user.id,
-      email: user.email || `${user.code.toLowerCase()}@thongke.gov.vn`,
-      displayName: user.name,
-      role: (user.role.toLowerCase() as any) || 'surveyor',
-      departmentId: user.departmentId || 'pb_tkth',
-      assignedAreaCodes: user.assignedAreas || ['ALL'],
-      updatedAt: new Date().toISOString()
-    }, { merge: true }).catch(err => console.warn('User profile sync error:', err));
-
     setLoginIdentifier('');
     setLoginPassword('');
     setShowLoginModal(false);
@@ -3747,7 +4077,7 @@ export default function App() {
       };
 
       await handleSaveSurveyor(updatedUser);
-      showNotification('success', 'Đã đổi mật khẩu thành công! Mật khẩu mới đã được lưu an toàn trên Firebase Firestore.');
+      showNotification('success', 'Đã đổi mật khẩu và lưu cục bộ trên máy này.');
       setShowChangePasswordModal(false);
       setCurrentPasswordInput('');
       setNewPasswordInput('');
@@ -3759,21 +4089,7 @@ export default function App() {
     }
   };
 
-  const handleSyncFirebase = async () => {
-    try {
-      setIsSyncing(true);
-      showNotification('success', 'Đang kiểm tra và đồng bộ trạng thái với Firebase Cloud...');
-      const hSnap = await getDocs(collection(db, 'households'));
-      const sSnap = await getDocs(collection(db, 'surveyors'));
-      showNotification('success', `Firebase Cloud đã đồng bộ an toàn: ${hSnap.size} hộ & ${sSnap.size} người nhập phiếu trên Firestore.`);
-    } catch (err: any) {
-      showNotification('error', 'Lỗi kiểm tra Firebase: ' + (err.message || String(err)));
-    } finally {
-      setIsSyncing(false);
-    }
-  };
-
-  // 1. Clear All Data (Households, Areas, Communes) to re-upload from scratch
+  // Xóa bảng kê cục bộ để nạp lại dữ liệu từ file Excel.
   const handleClearAllData = async () => {
     setIsDeleting(true);
     setDeleteProgressText('Đang xóa toàn bộ dữ liệu hệ thống...');
@@ -3799,29 +4115,6 @@ export default function App() {
     setIsDeleting(false);
     setDeleteProgressText('');
 
-    // Attempt background Firestore sync
-    try {
-      const [hSnap, aSnap, cSnap] = await Promise.all([
-        getDocs(collection(db, 'households')),
-        getDocs(collection(db, 'surveyAreas')),
-        getDocs(collection(db, 'communes'))
-      ]);
-
-      const allRefs = [
-        ...hSnap.docs.map(d => doc(db, 'households', d.id)),
-        ...aSnap.docs.map(d => doc(db, 'surveyAreas', d.id)),
-        ...cSnap.docs.map(d => doc(db, 'communes', d.id))
-      ];
-
-      for (let i = 0; i < allRefs.length; i += 300) {
-        const chunk = allRefs.slice(i, i + 300);
-        const batch = writeBatch(db);
-        chunk.forEach(r => batch.delete(r));
-        await batch.commit();
-      }
-    } catch (err: any) {
-      console.warn("Background Firestore clear warning:", err);
-    }
   };
 
   // 2. Delete single commune and its related areas and households
@@ -3860,23 +4153,6 @@ export default function App() {
     setIsDeleting(false);
     setDeleteProgressText('');
 
-    // Background delete from Firestore
-    try {
-      const refsToDelete = [
-        doc(db, 'communes', communeId),
-        ...matchingAreas.map(a => doc(db, 'surveyAreas', a.id)),
-        ...matchingHouseholds.map(h => doc(db, 'households', h.id))
-      ];
-
-      for (let i = 0; i < refsToDelete.length; i += 300) {
-        const chunk = refsToDelete.slice(i, i + 300);
-        const batch = writeBatch(db);
-        chunk.forEach(r => batch.delete(r));
-        await batch.commit();
-      }
-    } catch (err: any) {
-      console.warn("Background delete commune warning:", err);
-    }
   };
 
   // 3. Delete single area and its related households
@@ -3905,21 +4181,6 @@ export default function App() {
     setIsDeleting(false);
     setDeleteProgressText('');
 
-    try {
-      const refsToDelete = [
-        doc(db, 'surveyAreas', area.id),
-        ...matchingHouseholds.map(h => doc(db, 'households', h.id))
-      ];
-
-      for (let i = 0; i < refsToDelete.length; i += 300) {
-        const chunk = refsToDelete.slice(i, i + 300);
-        const batch = writeBatch(db);
-        chunk.forEach(r => batch.delete(r));
-        await batch.commit();
-      }
-    } catch (err: any) {
-      console.warn("Background delete area warning:", err);
-    }
   };
 
   // 4. Delete single household
@@ -4890,6 +5151,13 @@ export default function App() {
   }
 
   if (!isLoggedIn) {
+    if (!localDataReady) {
+      return (
+        <div className="min-h-screen bg-sky-950 text-white flex items-center justify-center text-sm font-semibold">
+          Đang mở dữ liệu cục bộ trên thiết bị...
+        </div>
+      );
+    }
     return (
       <div className="min-h-screen bg-linear-to-b from-sky-900 via-sky-850 to-slate-900 text-slate-900 flex flex-col items-center justify-center p-4 selection:bg-sky-200">
         {notification && (
@@ -4965,6 +5233,23 @@ export default function App() {
                 </button>
               </div>
             </div>
+
+            <label className="flex items-center justify-center gap-2 rounded-lg border border-sky-300 bg-sky-50 px-3 py-2 text-xs font-bold text-sky-800 hover:bg-sky-100 cursor-pointer">
+              <Upload className="w-4 h-4" />
+              <span>Nạp gói phân công JSON từ Admin</span>
+              <input
+                type="file"
+                accept=".json,application/json"
+                className="hidden"
+                onChange={handleImportAssignmentBeforeLogin}
+              />
+            </label>
+
+            {loginInfo && (
+              <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-emerald-800 text-xs font-semibold">
+                {loginInfo}
+              </div>
+            )}
 
             {loginError && (
               <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 text-xs font-semibold flex items-center gap-2">
@@ -5493,6 +5778,42 @@ export default function App() {
               </span>
             )}
 
+            {currentUser.role === 'ADMIN' && (
+              <>
+                <button
+                  type="button"
+                  onClick={handleExportLocalBackup}
+                  className="h-8 px-3 bg-slate-700 hover:bg-slate-600 text-white rounded border border-slate-600 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  title="Tải bản sao lưu đầy đủ dữ liệu cục bộ về thiết bị"
+                >
+                  <Database className="w-4 h-4" />
+                  <span>Sao lưu JSON</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportPreRestoreBackup}
+                  className="h-8 px-3 bg-slate-600 hover:bg-slate-500 text-white rounded border border-slate-500 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  title="Tải bản sao lưu được giữ lại trước lần khôi phục gần nhất"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>Tải backup cũ</span>
+                </button>
+                <label
+                  className="h-8 px-3 bg-amber-700 hover:bg-amber-600 text-white rounded border border-amber-600 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  title="Khôi phục toàn bộ dữ liệu từ file backup JSON trên thiết bị"
+                >
+                  <Upload className="w-4 h-4" />
+                  <span>Khôi phục backup JSON</span>
+                  <input
+                    type="file"
+                    accept=".json,application/json"
+                    className="hidden"
+                    onChange={handleRestoreLocalBackup}
+                  />
+                </label>
+              </>
+            )}
+
             <button 
               onClick={handleExportEnteredQuestionnairesExcel} 
               className="h-8 px-3.5 bg-teal-800 hover:bg-teal-700 active:bg-teal-900 text-xs font-bold rounded border border-teal-700 text-white flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
@@ -5995,6 +6316,7 @@ export default function App() {
             areas={areas}
             communes={communes}
             currentUser={currentUser}
+            cloudProgress={cloudProgress}
             onOpenHouseholdForm={(hh) => {
               setActiveHouseholdForm(hh);
             }}
@@ -6746,7 +7068,7 @@ export default function App() {
                   <span>Quản lý danh mục Xã, Địa bàn & Dữ liệu lưu trữ</span>
                 </h2>
                 <p className="text-xs text-slate-600 mt-0.5">
-                  Quản lý các đơn vị xã, địa bàn và xóa dữ liệu khi cần tải lại file Excel mới. Dữ liệu được đồng bộ trực tiếp lên Firebase Firestore.
+                  Quản lý danh mục xã, địa bàn trên máy này; dữ liệu nghiệp vụ chỉ được lưu cục bộ. Firebase chỉ nhận số đếm tiến độ.
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -7209,8 +7531,6 @@ export default function App() {
               showNotification('success', `Đang thao tác với vai trò: ${s.name} (${ROLE_LABELS[s.role]?.label || s.role})`);
             }}
             showNotification={showNotification}
-            onSyncFirebase={handleSyncFirebase}
-            isSyncing={isSyncing}
           />
         )}
 
@@ -7416,7 +7736,7 @@ export default function App() {
                   className="px-4 py-2 bg-sky-800 hover:bg-sky-700 text-white rounded font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
                 >
                   <Save className="w-4 h-4" />
-                  <span>Lưu thay đổi & Đồng bộ Firebase</span>
+                  <span>Lưu thay đổi trên máy này</span>
                 </button>
               </div>
             </form>
@@ -7502,7 +7822,7 @@ export default function App() {
                   className="px-4 py-2 bg-emerald-700 hover:bg-emerald-600 text-white rounded font-bold flex items-center gap-1.5 cursor-pointer shadow-xs"
                 >
                   <Plus className="w-4 h-4" />
-                  <span>Thêm xã & Lưu cố định Firebase</span>
+                  <span>Thêm xã & Lưu trên máy này</span>
                 </button>
               </div>
             </form>
@@ -7715,15 +8035,11 @@ export default function App() {
           onClose={() => setIsDataTransferModalOpen(false)}
           currentUser={currentUser}
           surveyors={surveyors}
+          departments={departments}
           communes={communes}
           areas={areas}
           households={households}
-          onUpdateHouseholds={(updated) => {
-            setHouseholds(updated);
-            try {
-              localStorage.setItem('cached_households', JSON.stringify(updated));
-            } catch (e) {}
-          }}
+          onApplyWorkPackage={handleApplyWorkPackage}
           showNotification={showNotification}
           initialMode={dataTransferMode}
         />
@@ -7888,7 +8204,7 @@ export default function App() {
               </div>
               
               <p className="text-slate-600">
-                Dữ liệu sẽ được dọn sạch hoàn toàn trên cả <strong>Firebase Cloud</strong> và bộ nhớ trình duyệt, đưa hệ thống về trạng thái ban đầu để bạn tải file Excel mới.
+                Bảng kê xã, địa bàn và hộ sẽ được xóa khỏi máy này để bạn tải file Excel mới. Dữ liệu tiến độ trên Firebase không bị xóa.
               </p>
 
               <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200">
@@ -7937,7 +8253,7 @@ export default function App() {
                 Bạn có chắc chắn muốn xóa xã <strong className="text-rose-700 font-bold">"{communeToDelete.communeName}"</strong> (Mã: {communeToDelete.communeCode})?
               </p>
               <p className="text-slate-500 text-[11px]">
-                Toàn bộ các địa bàn và hộ gia đình thuộc xã này trên Firebase cũng sẽ được xóa đồng thời.
+                Toàn bộ địa bàn và hộ thuộc xã này sẽ bị xóa khỏi máy này.
               </p>
 
               <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 mt-1">
@@ -7985,7 +8301,7 @@ export default function App() {
                 Bạn có chắc chắn muốn xóa địa bàn <strong className="text-rose-700 font-bold">"{areaToDelete.name}"</strong> (Mã: {areaToDelete.code})?
               </p>
               <p className="text-slate-500 text-[11px]">
-                Toàn bộ các hộ gia đình thuộc địa bàn này trên Firebase cũng sẽ được xóa.
+                Toàn bộ hộ thuộc địa bàn này sẽ bị xóa khỏi máy này.
               </p>
 
               <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 mt-1">
@@ -8030,7 +8346,7 @@ export default function App() {
 
             <div className="p-4 flex flex-col gap-3 text-slate-700">
               <p>
-                Bạn có chắc chắn muốn xóa hộ <strong className="text-rose-700 font-bold">"{householdToDelete.householdHead}"</strong> (Địa chỉ: {householdToDelete.address || householdToDelete.areaName}) khỏi hệ thống và Firebase?
+                Bạn có chắc chắn muốn xóa hộ <strong className="text-rose-700 font-bold">"{householdToDelete.householdHead}"</strong> (Địa chỉ: {householdToDelete.address || householdToDelete.areaName}) khỏi máy này?
               </p>
 
               <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 mt-1">
@@ -8074,7 +8390,7 @@ export default function App() {
 
             <div className="p-4 flex flex-col gap-3 text-slate-700">
               <p>
-                Bạn có chắc chắn muốn xóa <strong className="text-rose-700 font-bold">{selectedHouseholdIds.length}</strong> hộ gia đình đã được tích chọn khỏi hệ thống và Firebase?
+                Bạn có chắc chắn muốn xóa <strong className="text-rose-700 font-bold">{selectedHouseholdIds.length}</strong> hộ gia đình đã được tích chọn khỏi máy này?
               </p>
 
               <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 mt-1">
@@ -8105,7 +8421,7 @@ export default function App() {
           <div className="bg-white rounded-lg border border-slate-300 shadow-2xl max-w-md w-full p-6 flex flex-col items-center gap-4 text-center">
             <Loader2 className="w-10 h-10 text-rose-600 animate-spin" />
             <div>
-              <h3 className="font-bold text-slate-900 text-base uppercase text-rose-800">Đang xử lý xóa dữ liệu Firebase</h3>
+              <h3 className="font-bold text-slate-900 text-base uppercase text-rose-800">Đang xử lý xóa dữ liệu cục bộ</h3>
               <p className="text-xs text-slate-600 mt-2 font-medium">{deleteProgressText}</p>
             </div>
             <div className="w-full bg-slate-200 rounded-full h-2 overflow-hidden mt-2">
