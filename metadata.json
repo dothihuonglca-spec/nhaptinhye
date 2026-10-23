@@ -1,0 +1,6 @@
+{
+  "name": "Hệ thống Quản lý Nhập tin & Tổng hợp Nhanh Hộ gia đình",
+  "description": "Phần mềm import bảng kê Excel, nhập tin phiếu điều tra và tổng hợp nhanh toàn xã.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

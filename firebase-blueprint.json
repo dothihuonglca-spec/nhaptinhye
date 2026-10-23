@@ -1,0 +1,144 @@
+{
+  "entities": {
+    "Surveyor": {
+      "title": "Surveyor",
+      "description": "Enumerator or Administrator responsible for survey data entry and permissions",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique surveyor identifier" },
+        "code": { "type": "string", "description": "Enumerator code such as DTV01" },
+        "name": { "type": "string", "description": "Full name of surveyor" },
+        "phone": { "type": "string", "description": "Phone number" },
+        "role": { "type": "string", "description": "User role: ADMIN, SURVEYOR, or SUPERVISOR" },
+        "status": { "type": "string", "description": "Status: ACTIVE or LOCKED" },
+        "assignedAreas": { "type": "array", "description": "Assigned survey area codes" },
+        "note": { "type": "string", "description": "Optional notes or unit information" }
+      },
+      "required": ["id", "code", "name", "role", "status"]
+    },
+    "Household": {
+      "title": "Household",
+      "description": "Household survey record (bang ke ho) and attached questionnaire",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique household record ID" },
+        "communeId": { "type": "string", "description": "Commune ID" },
+        "tkcsCode": { "type": "string", "description": "TKCS Code" },
+        "tkcsName": { "type": "string", "description": "TKCS Name" },
+        "communeCode": { "type": "string", "description": "Commune Code" },
+        "communeName": { "type": "string", "description": "Commune Name" },
+        "areaId": { "type": "string", "description": "Survey area ID" },
+        "areaCode": { "type": "string", "description": "Survey area code 001 to N" },
+        "areaName": { "type": "string", "description": "Area sheet name" },
+        "sttMau": { "type": "string", "description": "Sample serial number" },
+        "sampleStatus": { "type": "string", "description": "CHINH THUC or DU PHONG" },
+        "sttGoc": { "type": "string", "description": "Original serial number" },
+        "householdHead": { "type": "string", "description": "Household head name" },
+        "address": { "type": "string", "description": "Household address" },
+        "membersCount": { "type": "number", "description": "Number of members" },
+        "sectorCode": { "type": "number", "description": "Sector code (1-4)" },
+        "sectorName": { "type": "string", "description": "Sector name" },
+        "assignedSurveyorId": { "type": "string", "description": "Assigned surveyor ID" },
+        "assignedSurveyorName": { "type": "string", "description": "Assigned surveyor Name" },
+        "surveyStatus": { "type": "string", "description": "Survey status: CHUA_NHAP, DANG_NHAP, DA_HOAN_THANH, DA_DUYET" },
+        "questionnaire": { "type": "object", "description": "Full Appendix II survey questionnaire details" }
+      },
+      "required": ["id", "householdHead"]
+    },
+    "Commune": {
+      "title": "Commune",
+      "description": "Commune survey unit and TKCS metadata",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique commune ID" },
+        "tkcsCode": { "type": "string", "description": "Statistical Survey Unit code" },
+        "tkcsName": { "type": "string", "description": "Statistical Survey Unit name" },
+        "communeCode": { "type": "string", "description": "Commune code" },
+        "communeName": { "type": "string", "description": "Commune name" }
+      },
+      "required": ["id"]
+    },
+    "SurveyArea": {
+      "title": "SurveyArea",
+      "description": "Survey area (diaban) corresponding to Excel sheets",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique area ID" },
+        "communeId": { "type": "string", "description": "Parent commune ID" },
+        "code": { "type": "string", "description": "Sequential area code (001, 002...)" },
+        "name": { "type": "string", "description": "Sheet name as area name" }
+      },
+      "required": ["id", "code", "name"]
+    },
+    "Enterprise01": {
+      "title": "Enterprise01",
+      "description": "Enterprise survey 01/TGTSP-DNCN for industrial production",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique record ID" },
+        "taxCode": { "type": "string", "description": "Tax identification code" },
+        "enterpriseName": { "type": "string", "description": "Company name" },
+        "communeCode": { "type": "string", "description": "Commune code" },
+        "communeName": { "type": "string", "description": "Commune name" },
+        "surveyStatus": { "type": "string", "description": "Status" }
+      },
+      "required": ["id", "enterpriseName"]
+    },
+    "Establishment02": {
+      "title": "Establishment02",
+      "description": "Individual establishment survey 02/TGTSP-CTCN",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique record ID" },
+        "establishmentOrder": { "type": "string", "description": "Establishment order number" },
+        "establishmentName": { "type": "string", "description": "Establishment name" },
+        "communeCode": { "type": "string", "description": "Commune code" },
+        "communeName": { "type": "string", "description": "Commune name" },
+        "surveyStatus": { "type": "string", "description": "Status" }
+      },
+      "required": ["id", "establishmentName"]
+    },
+    "IndustrialSummary": {
+      "title": "IndustrialSummary",
+      "description": "Summary report 03/TH-CN and 04/TH-CN",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Unique summary ID" },
+        "communeCode": { "type": "string", "description": "Commune code" },
+        "communeName": { "type": "string", "description": "Commune name" },
+        "surveyYear": { "type": "string", "description": "Survey year" }
+      },
+      "required": ["id", "communeCode"]
+    }
+  },
+  "firestore": {
+    "/surveyors/{surveyorId}": {
+      "schema": "Surveyor",
+      "description": "List of enumerators and permissions"
+    },
+    "/households/{householdId}": {
+      "schema": "Household",
+      "description": "Households sample and Appendix II survey questionnaires"
+    },
+    "/communes/{communeId}": {
+      "schema": "Commune",
+      "description": "Commune and TKCS metadata"
+    },
+    "/surveyAreas/{areaId}": {
+      "schema": "SurveyArea",
+      "description": "Survey areas corresponding to Excel sheets"
+    },
+    "/enterprises_01/{enterpriseId}": {
+      "schema": "Enterprise01",
+      "description": "Enterprises industrial survey form 01/TGTSP-DNCN"
+    },
+    "/establishments_02/{establishmentId}": {
+      "schema": "Establishment02",
+      "description": "Individual establishments industrial survey form 02/TGTSP-CTCN"
+    },
+    "/industrial_summaries/{summaryId}": {
+      "schema": "IndustrialSummary",
+      "description": "Industrial product summary reports forms 03 and 04"
+    }
+  }
+}
