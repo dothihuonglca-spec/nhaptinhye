@@ -3231,7 +3231,7 @@ export default function App() {
         throw new Error(
           `Sau khi đọc file, hệ thống nhận được ${restored.communes.length} xã, ` +
           `${restored.areas.length} địa bàn và ${restored.households.length} hộ. ` +
-          `Trường households cấp ngoài: ${diagnostics.householdFieldType}; ` +
+          `Trường ${diagnostics.householdFieldPath}: ${diagnostics.householdFieldType}; ` +
           `${diagnostics.householdArrayLength} phần tử, ${diagnostics.householdObjectCount} bản ghi object, ` +
           `${diagnostics.householdRecordsWithId} bản ghi có mã hộ, ` +
           `${diagnostics.householdRecordsWithAreaId} bản ghi có mã địa bàn, ` +
