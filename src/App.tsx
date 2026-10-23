@@ -4157,6 +4157,93 @@ export default function App() {
       if (existingUser?.status === 'LOCKED' || existingUser?.status === 'INACTIVE') {
         throw new Error('Tài khoản hiện có trên máy đang bị khóa hoặc ngừng hoạt động.');
       }
+      const incomingHouseholdCount = entries.reduce((count, entry) => count + entry.households.length, 0);
+      if (incomingHouseholdCount === 0) {
+        throw new Error('Gói phân công có địa bàn nhưng không có danh sách hộ. Hãy yêu cầu Admin xuất lại bảng kê.');
+      }
+
+      const nextCommunes = [...communes];
+      const nextAreas = [...areas];
+      const nextHouseholds = [...households];
+      const householdIndexById = new Map(nextHouseholds.map((household, index) => [household.id, index]));
+      const householdIndexByCompositeKey = new Map<string, number>();
+      nextHouseholds.forEach((household, index) => {
+        const key = householdCompositeKey(household);
+        if (!householdIndexByCompositeKey.has(key)) householdIndexByCompositeKey.set(key, index);
+      });
+      let addedHouseholdCount = 0;
+      let updatedHouseholdCount = 0;
+
+      entries.forEach(entry => {
+        const communeIndex = nextCommunes.findIndex(commune =>
+          commune.id === entry.commune.id ||
+          (commune.communeCode && commune.communeCode === entry.commune.communeCode)
+        );
+        const commune = communeIndex >= 0
+          ? { ...nextCommunes[communeIndex], ...entry.commune, id: nextCommunes[communeIndex].id }
+          : entry.commune;
+        if (communeIndex >= 0) nextCommunes[communeIndex] = commune;
+        else nextCommunes.push(commune);
+
+        const areaIndex = nextAreas.findIndex(area =>
+          area.id === entry.area.id ||
+          (area.code === entry.area.code && (
+            area.communeId === commune.id ||
+            area.communeCode === commune.communeCode
+          ))
+        );
+        const area = areaIndex >= 0
+          ? { ...nextAreas[areaIndex], ...entry.area, id: nextAreas[areaIndex].id, communeId: commune.id }
+          : { ...entry.area, communeId: commune.id };
+        if (areaIndex >= 0) nextAreas[areaIndex] = area;
+        else nextAreas.push(area);
+
+        entry.households.forEach(incoming => {
+          if (incoming.assignedSurveyorId && incoming.assignedSurveyorId !== profile.id) {
+            throw new Error(`Hộ ${incoming.sttMau || incoming.id} trong file đang được gán cho tài khoản ĐTV khác.`);
+          }
+          const belongsToEntry = incoming.areaId === entry.area.id ||
+            (incoming.areaCode === entry.area.code && (
+              incoming.communeId === entry.commune.id ||
+              incoming.communeCode === entry.commune.communeCode
+            ));
+          if (!belongsToEntry) {
+            throw new Error(`Hộ ${incoming.sttMau || incoming.id} không thuộc địa bàn ${entry.area.code} trong file.`);
+          }
+
+          const householdIndex = householdIndexById.get(incoming.id) ??
+            householdIndexByCompositeKey.get(householdCompositeKey(incoming)) ??
+            -1;
+          const existing = householdIndex >= 0 ? nextHouseholds[householdIndex] : undefined;
+          if (existing?.assignedSurveyorId && existing.assignedSurveyorId !== profile.id) {
+            throw new Error(`Hộ ${existing.sttMau || existing.id} trên thiết bị đang được giao cho ĐTV khác.`);
+          }
+          const household: Household = {
+            ...existing,
+            ...incoming,
+            id: existing?.id || incoming.id,
+            communeId: commune.id,
+            areaId: area.id,
+            assignedSurveyorId: profile.id,
+            assignedSurveyorName: profile.name,
+            questionnaire: existing?.questionnaire || incoming.questionnaire,
+            surveyStatus: existing?.surveyStatus || incoming.surveyStatus,
+            updatedAt: existing?.updatedAt || incoming.updatedAt,
+            updatedBy: existing?.updatedBy || incoming.updatedBy
+          };
+          const finalIndex = householdIndex >= 0 ? householdIndex : nextHouseholds.length;
+          if (householdIndex >= 0) {
+            nextHouseholds[householdIndex] = household;
+            updatedHouseholdCount++;
+          } else {
+            nextHouseholds.push(household);
+            addedHouseholdCount++;
+          }
+          householdIndexById.set(household.id, finalIndex);
+          householdIndexByCompositeKey.set(householdCompositeKey(household), finalIndex);
+        });
+      });
+
       const assignedAreas = Array.from(new Set([
         ...(existingUser?.assignedAreas || []),
         ...entries.map(entry => entry.area.id)
@@ -4174,13 +4261,26 @@ export default function App() {
       const nextSurveyors = existingUser
         ? surveyors.map(item => item.id === profile.id ? importedUser : item)
         : [...surveyors, importedUser];
+      await saveLocalDataSnapshot({
+        communes: nextCommunes,
+        areas: nextAreas,
+        households: nextHouseholds,
+        surveyors: nextSurveyors,
+        departments
+      });
+      setCommunes(nextCommunes);
+      setAreas(nextAreas);
+      setHouseholds(nextHouseholds);
       setSurveyors(nextSurveyors);
+      localStorage.setItem('cached_communes', JSON.stringify(nextCommunes));
+      localStorage.setItem('cached_areas', JSON.stringify(nextAreas));
+      localStorage.setItem('cached_households', JSON.stringify(nextHouseholds));
       localStorage.setItem('cached_surveyors', JSON.stringify(nextSurveyors));
       setLoginIdentifier(profile.username || profile.code);
       setLoginError('');
       setLoginInfo(existingUser
-        ? `Đã nạp phân quyền và ${entries.length} địa bàn cho ${profile.name}. Hãy đăng nhập bằng mật khẩu hiện có.`
-        : `Đã tạo tài khoản ${profile.name}. Mật khẩu khởi tạo: ${INITIAL_DEFAULT_PASSWORD}; hệ thống sẽ yêu cầu đổi mật khẩu sau khi đăng nhập.`
+        ? `Đã nạp ${addedHouseholdCount} hộ mới, cập nhật ${updatedHouseholdCount} hộ và ${entries.length} địa bàn cho ${profile.name}. Hãy đăng nhập bằng mật khẩu hiện có.`
+        : `Đã nạp ${addedHouseholdCount} hộ mới, cập nhật ${updatedHouseholdCount} hộ và tạo tài khoản ${profile.name}. Mật khẩu khởi tạo: ${INITIAL_DEFAULT_PASSWORD}; hệ thống sẽ yêu cầu đổi mật khẩu sau khi đăng nhập.`
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

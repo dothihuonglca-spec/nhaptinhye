@@ -257,6 +257,12 @@ export default function AreaDataTransferModal({
               surveyor
             );
             const payload = JSON.parse(areaJson.content) as { households: Household[] };
+            if (payload.households.length === 0) {
+              throw new Error(
+                `Địa bàn ${area.code} (${area.name}) không có hộ trong file xuất. ` +
+                'Hãy kiểm tra phân công hoặc khôi phục đúng bảng kê trước khi gửi gói cho ĐTV.'
+              );
+            }
             return {
               surveyorId: surveyor.id,
               surveyorName: surveyor.name,
