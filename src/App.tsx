@@ -56,6 +56,7 @@ import {
 import {
   loadPreRestoreSnapshot,
   loadLocalDataSnapshot,
+  inspectLocalDataBackup,
   parseLocalDataBackup,
   saveLocalDataSnapshot,
   serializeLocalDataBackup
@@ -3226,9 +3227,15 @@ export default function App() {
       const parsed: unknown = JSON.parse(await file.text());
       const restored = parseLocalDataBackup(parsed, surveyors, departments);
       if (restored.households.length === 0 || restored.areas.length === 0) {
+        const diagnostics = inspectLocalDataBackup(parsed);
         throw new Error(
           `Sau khi đọc file, hệ thống nhận được ${restored.communes.length} xã, ` +
           `${restored.areas.length} địa bàn và ${restored.households.length} hộ. ` +
+          `Trường households cấp ngoài: ${diagnostics.householdFieldType}; ` +
+          `${diagnostics.householdArrayLength} phần tử, ${diagnostics.householdObjectCount} bản ghi object, ` +
+          `${diagnostics.householdRecordsWithId} bản ghi có mã hộ, ` +
+          `${diagnostics.householdRecordsWithAreaId} bản ghi có mã địa bàn, ` +
+          `${diagnostics.householdRecordsNestedUnderAreas} hộ nằm trong địa bàn. ` +
           'Cần có ít nhất 1 địa bàn và 1 hộ; dữ liệu hiện tại chưa bị thay đổi.'
         );
       }
