@@ -3180,6 +3180,56 @@ export default function App() {
     }
   };
 
+  const handleExportSurveyorBackup = () => {
+    try {
+      const assignedAreas = areas.filter(area =>
+        isAreaAssigned(area, currentUser.assignedAreas || []) ||
+        households.some(household =>
+          household.assignedSurveyorId === currentUser.id &&
+          (household.areaId === area.id ||
+            (household.areaCode === area.code &&
+              (household.communeId === area.communeId || household.communeCode === area.communeCode)))
+        )
+      );
+      const assignedHouseholds = households.filter(household =>
+        household.assignedSurveyorId === currentUser.id &&
+        assignedAreas.some(area =>
+          household.areaId === area.id ||
+          (household.areaCode === area.code &&
+            (household.communeId === area.communeId || household.communeCode === area.communeCode))
+        )
+      );
+      const assignedCommunes = communes.filter(commune =>
+        assignedAreas.some(area =>
+          area.communeId === commune.id || area.communeCode === commune.communeCode
+        )
+      );
+      if (assignedAreas.length === 0 || assignedHouseholds.length === 0) {
+        showNotification('error', 'Không có hộ thuộc phân công của tài khoản này để sao lưu. Hãy nạp gói phân công trước.');
+        return;
+      }
+
+      const snapshot = {
+        communes: assignedCommunes,
+        areas: assignedAreas,
+        households: assignedHouseholds,
+        surveyors: [currentUser],
+        departments: []
+      };
+      downloadLocalBackup(
+        snapshot,
+        `Sao_Luu_DTV_${currentUser.code}_${new Date().toISOString().slice(0, 10)}.json`,
+        { id: currentUser.id, role: 'SURVEYOR' }
+      );
+      showNotification(
+        'success',
+        `Đã sao lưu riêng ${assignedAreas.length} địa bàn và ${assignedHouseholds.length} hộ của tài khoản ${currentUser.name}.`
+      );
+    } catch (err) {
+      showNotification('error', `Không thể xuất bản sao lưu ĐTV: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
   const handleExportPreRestoreBackup = async () => {
     try {
       const snapshot = await loadPreRestoreSnapshot();
@@ -3200,8 +3250,8 @@ export default function App() {
     households: Household[];
     surveyors: Surveyor[];
     departments: Department[];
-  }, fileName: string) => {
-    const blob = new Blob([serializeLocalDataBackup(snapshot)], {
+  }, fileName: string, backupOwner?: Pick<Surveyor, 'id' | 'role'>) => {
+    const blob = new Blob([serializeLocalDataBackup(snapshot, backupOwner)], {
       type: 'application/json;charset=utf-8'
     });
     const url = URL.createObjectURL(blob);
@@ -3217,14 +3267,28 @@ export default function App() {
   const handleRestoreLocalBackup = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
-    if (currentUser.role !== 'ADMIN') {
-      showNotification('error', 'Chỉ tài khoản Admin được khôi phục toàn bộ dữ liệu cục bộ.');
+    if (currentUser.role !== 'ADMIN' && currentUser.role !== 'SURVEYOR') {
+      showNotification('error', 'Chỉ Admin hoặc ĐTV mới được khôi phục backup phù hợp với tài khoản.');
       event.target.value = '';
       return;
     }
 
     try {
       const parsed: unknown = JSON.parse(await file.text());
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('File backup không có cấu trúc JSON hợp lệ.');
+      }
+      const backupOwner = (parsed as { backupOwner?: unknown }).backupOwner;
+      if (currentUser.role === 'SURVEYOR') {
+        if (
+          !backupOwner ||
+          typeof backupOwner !== 'object' ||
+          (backupOwner as { id?: unknown }).id !== currentUser.id ||
+          (backupOwner as { role?: unknown }).role !== 'SURVEYOR'
+        ) {
+          throw new Error('ĐTV chỉ khôi phục được backup cá nhân do chính tài khoản của mình xuất.');
+        }
+      }
       const restored = parseLocalDataBackup(parsed, surveyors, departments);
       if (restored.households.length === 0 || restored.areas.length === 0) {
         const diagnostics = inspectLocalDataBackup(parsed);
@@ -3240,6 +3304,23 @@ export default function App() {
           'Cần có ít nhất 1 địa bàn và 1 hộ; dữ liệu hiện tại chưa bị thay đổi.'
         );
       }
+      if (currentUser.role === 'SURVEYOR') {
+        const assignedAreaKeys = currentUser.assignedAreas || [];
+        const hasOutOfScopeArea = restored.areas.some(area => {
+          const hasDirectlyAssignedHousehold = restored.households.some(household =>
+            household.assignedSurveyorId === currentUser.id &&
+            (household.areaId === area.id ||
+              (household.areaCode === area.code &&
+                (household.communeId === area.communeId || household.communeCode === area.communeCode)))
+          );
+          return !isAreaAssigned(area, assignedAreaKeys) && !hasDirectlyAssignedHousehold;
+        });
+        if (hasOutOfScopeArea || restored.households.some(household =>
+          household.assignedSurveyorId !== currentUser.id
+        )) {
+          throw new Error('Backup có địa bàn hoặc hộ ngoài phạm vi của ĐTV đang đăng nhập; dữ liệu hiện tại chưa bị thay đổi.');
+        }
+      }
       const confirmed = window.confirm(
         `Khôi phục ${file.name}?\n\n` +
         `Trong file: ${restored.communes.length} xã, ${restored.areas.length} địa bàn, ${restored.households.length} hộ.\n` +
@@ -3248,21 +3329,24 @@ export default function App() {
       );
       if (!confirmed) return;
 
+      const snapshotToRestore = currentUser.role === 'SURVEYOR'
+        ? { ...restored, surveyors, departments }
+        : restored;
       await saveLocalDataSnapshot(
-        restored,
+        snapshotToRestore,
         { communes, areas, households, surveyors, departments }
       );
-      setCommunes(restored.communes);
-      setAreas(restored.areas);
-      setHouseholds(restored.households);
-      setSurveyors(restored.surveyors);
-      setDepartments(restored.departments);
+      setCommunes(snapshotToRestore.communes);
+      setAreas(snapshotToRestore.areas);
+      setHouseholds(snapshotToRestore.households);
+      setSurveyors(snapshotToRestore.surveyors);
+      setDepartments(snapshotToRestore.departments);
       setSelectedCommuneId('ALL');
       setSelectedAreaId('ALL');
       setCurrentPage(1);
       showNotification(
         'success',
-        `Đã khôi phục ${restored.communes.length} xã, ${restored.areas.length} địa bàn và ${restored.households.length} hộ trên máy này.`
+        `Đã khôi phục ${snapshotToRestore.communes.length} xã, ${snapshotToRestore.areas.length} địa bàn và ${snapshotToRestore.households.length} hộ trên máy này.`
       );
     } catch (err) {
       showNotification('error', `Không thể khôi phục bản sao lưu: ${err instanceof Error ? err.message : String(err)}`);
@@ -5816,6 +5900,32 @@ export default function App() {
                 >
                   <Upload className="w-4 h-4" />
                   <span>Khôi phục backup JSON</span>
+                  <input
+                    type="file"
+                    accept=".json,application/json"
+                    className="hidden"
+                    onChange={handleRestoreLocalBackup}
+                  />
+                </label>
+              </>
+            )}
+            {currentUser.role === 'SURVEYOR' && (
+              <>
+                <button
+                  type="button"
+                  onClick={handleExportSurveyorBackup}
+                  className="h-8 px-3 bg-slate-700 hover:bg-slate-600 text-white rounded border border-slate-600 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  title="Tải backup chỉ gồm địa bàn và hộ được giao cho tài khoản ĐTV này"
+                >
+                  <Database className="w-4 h-4" />
+                  <span>Sao lưu của tôi</span>
+                </button>
+                <label
+                  className="h-8 px-3 bg-amber-700 hover:bg-amber-600 text-white rounded border border-amber-600 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  title="Khôi phục backup cá nhân đã xuất bằng chính tài khoản ĐTV này"
+                >
+                  <Upload className="w-4 h-4" />
+                  <span>Khôi phục backup của tôi</span>
                   <input
                     type="file"
                     accept=".json,application/json"
