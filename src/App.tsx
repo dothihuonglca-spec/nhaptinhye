@@ -3235,7 +3235,8 @@ export default function App() {
           `${diagnostics.householdArrayLength} phần tử, ${diagnostics.householdObjectCount} bản ghi object, ` +
           `${diagnostics.householdRecordsWithId} bản ghi có mã hộ, ` +
           `${diagnostics.householdRecordsWithAreaId} bản ghi có mã địa bàn, ` +
-          `${diagnostics.householdRecordsNestedUnderAreas} hộ nằm trong địa bàn. ` +
+          `${diagnostics.householdRecordsNestedUnderAreas} hộ nằm trong địa bàn, ` +
+          `${diagnostics.householdRecordsNestedUnderRosters} hộ trong rosters. ` +
           'Cần có ít nhất 1 địa bàn và 1 hộ; dữ liệu hiện tại chưa bị thay đổi.'
         );
       }

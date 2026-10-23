@@ -18,6 +18,7 @@ export interface LocalDataBackupDiagnostics {
   householdRecordsWithId: number;
   householdRecordsWithAreaId: number;
   householdRecordsNestedUnderAreas: number;
+  householdRecordsNestedUnderRosters: number;
 }
 
 const DATABASE_NAME = 'survey-local-data';
@@ -111,8 +112,11 @@ export function inspectLocalDataBackup(value: unknown): LocalDataBackupDiagnosti
   const surveyAreas = recordsFrom(root.surveyAreas) || [];
   const rootAreas = recordsFrom(root.areas);
   const areas = rootAreas?.length ? rootAreas : surveyAreas;
+  const rosters = recordsFrom(root.rosters) || [];
   const householdRecordsNestedUnderAreas = areas.reduce((count, area) =>
     count + (Array.isArray(area.households) ? area.households.filter(isRecord).length : 0), 0);
+  const householdRecordsNestedUnderRosters = rosters.reduce((count, roster) =>
+    count + (Array.isArray(roster.households) ? roster.households.filter(isRecord).length : 0), 0);
 
   return {
     topLevelKeys: Object.keys(root),
@@ -128,7 +132,8 @@ export function inspectLocalDataBackup(value: unknown): LocalDataBackupDiagnosti
     householdRecordsWithAreaId: householdRecords.filter(record =>
       Boolean(text(record.areaId).trim() || text(record.areaCode).trim())
     ).length,
-    householdRecordsNestedUnderAreas
+    householdRecordsNestedUnderAreas,
+    householdRecordsNestedUnderRosters
   };
 }
 
@@ -193,6 +198,32 @@ export function parseLocalDataBackup(
       }));
     });
     areaRecords = nestedCommuneAreas.length > 0 ? nestedCommuneAreas : null;
+  }
+
+  const rosters = recordsFrom(value.rosters) || [];
+  if (areaRecords !== null && rosters.length > 0) {
+    const rostersByAreaId = new Map<string, Record<string, unknown>>();
+    rosters.forEach(roster => {
+      const areaId = text(roster.areaId, text(roster.id));
+      if (areaId) rostersByAreaId.set(areaId, roster);
+    });
+    const matchedRosterIds = new Set<string>();
+    areaRecords = areaRecords.map(area => {
+      const areaId = text(area.id, text(area.areaId));
+      const roster = rostersByAreaId.get(areaId);
+      if (!roster) return area;
+      matchedRosterIds.add(areaId);
+      return {
+        ...roster,
+        ...area,
+        households: roster.households ?? area.households
+      };
+    });
+    const additionalRosters = rosters.filter(roster => {
+      const areaId = text(roster.areaId, text(roster.id));
+      return areaId && !matchedRosterIds.has(areaId);
+    });
+    areaRecords = [...areaRecords, ...additionalRosters];
   }
 
   if (areaRecords === null) {
