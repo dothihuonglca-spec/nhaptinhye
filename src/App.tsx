@@ -53,6 +53,13 @@ import {
   SurveyWorkPackage,
   isAreaAssigned
 } from './utils/areaDataTransfer';
+import {
+  loadPreRestoreSnapshot,
+  loadLocalDataSnapshot,
+  parseLocalDataBackup,
+  saveLocalDataSnapshot,
+  serializeLocalDataBackup
+} from './utils/localDataBackup';
 
 // Tài khoản Quản trị viên Master thực tế + 58 cán bộ chính thức theo danh sách chuẩn từ ảnh
 export const DEFAULT_SURVEYORS: Surveyor[] = [
@@ -257,6 +264,7 @@ export default function App() {
 
   const [currentSurveyorId, setCurrentSurveyorId] = useState<string>('admin');
   const [loading, setLoading] = useState<boolean>(false);
+  const [localDataReady, setLocalDataReady] = useState<boolean>(false);
   const [cloudProgress, setCloudProgress] = useState<AreaProgressSnapshot[]>([]);
   
   // Real Login & Authentication States
@@ -393,24 +401,61 @@ export default function App() {
   const [catalogSearchTerm, setCatalogSearchTerm] = useState('');
 
   useEffect(() => {
-    setLoading(false);
+    let cancelled = false;
+    const initializeLocalData = async () => {
+      try {
+        const snapshot = await loadLocalDataSnapshot();
+        if (cancelled) return;
+        if (snapshot) {
+          setCommunes(snapshot.communes);
+          setAreas(snapshot.areas);
+          setHouseholds(snapshot.households);
+          setSurveyors(snapshot.surveyors);
+          setDepartments(snapshot.departments);
+        } else {
+          await saveLocalDataSnapshot({ communes, areas, households, surveyors, departments });
+        }
+        localStorage.removeItem('cached_households');
+      } catch (err) {
+        console.error('Không thể mở kho dữ liệu cục bộ:', err);
+        if (!cancelled) {
+          setNotification({
+            type: 'error',
+            message: 'Không mở được kho dữ liệu cục bộ. Hãy dùng trình duyệt hỗ trợ IndexedDB và không xóa dữ liệu trang web.'
+          });
+        }
+      } finally {
+        if (!cancelled) {
+          setLocalDataReady(true);
+          setLoading(false);
+        }
+      }
+    };
+    void initializeLocalData();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
+    if (!localDataReady) return;
+    void saveLocalDataSnapshot({ communes, areas, households, surveyors, departments })
+      .catch(err => {
+        console.error('Không thể lưu dữ liệu nghiệp vụ trên thiết bị:', err);
+        setNotification({
+          type: 'error',
+          message: 'Không lưu được dữ liệu vào kho cục bộ của trình duyệt. Hãy xuất bản sao lưu và kiểm tra dung lượng thiết bị.'
+        });
+      });
     try {
       localStorage.setItem('cached_communes', JSON.stringify(communes));
       localStorage.setItem('cached_areas', JSON.stringify(areas));
-      localStorage.setItem('cached_households', JSON.stringify(households));
       localStorage.setItem('cached_surveyors', JSON.stringify(surveyors));
       localStorage.setItem('cached_departments', JSON.stringify(departments));
     } catch (err) {
-      console.error('Không thể lưu dữ liệu nghiệp vụ trên thiết bị:', err);
-      setNotification({
-        type: 'error',
-        message: 'Không đủ dung lượng lưu trữ trên trình duyệt. Hãy xuất các gói JSON cần thiết và giải phóng dung lượng.'
-      });
+      console.error('Không thể cập nhật bộ nhớ đệm tương thích:', err);
     }
-  }, [communes, areas, households, surveyors, departments]);
+  }, [localDataReady, communes, areas, households, surveyors, departments]);
 
   useEffect(() => {
     const repairedHouseholds = households.map(household => ({ ...household }));
@@ -3124,6 +3169,96 @@ export default function App() {
     showNotification('success', `Đã lưu phiếu Phụ lục II của hộ "${updatedHousehold.householdHead}" thành công.`);
   };
 
+  const handleExportLocalBackup = () => {
+    try {
+      const snapshot = { communes, areas, households, surveyors, departments };
+      downloadLocalBackup(snapshot, `Sao_Luu_Bang_Ke_${new Date().toISOString().slice(0, 10)}.json`);
+      showNotification('success', `Đã xuất bản sao lưu cục bộ gồm ${communes.length} xã, ${areas.length} địa bàn và ${households.length} hộ.`);
+    } catch (err) {
+      showNotification('error', `Không thể xuất bản sao lưu: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const handleExportPreRestoreBackup = async () => {
+    try {
+      const snapshot = await loadPreRestoreSnapshot();
+      if (!snapshot) {
+        showNotification('error', 'Chưa có bản sao lưu trước lần khôi phục nào trên thiết bị này.');
+        return;
+      }
+      downloadLocalBackup(snapshot, `Sao_Luu_Truoc_Khoi_Phu_${new Date().toISOString().slice(0, 10)}.json`);
+      showNotification('success', `Đã tải bản dự phòng gồm ${snapshot.households.length} hộ.`);
+    } catch (err) {
+      showNotification('error', `Không thể tải bản dự phòng: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const downloadLocalBackup = (snapshot: {
+    communes: Commune[];
+    areas: SurveyArea[];
+    households: Household[];
+    surveyors: Surveyor[];
+    departments: Department[];
+  }, fileName: string) => {
+    const blob = new Blob([serializeLocalDataBackup(snapshot)], {
+      type: 'application/json;charset=utf-8'
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const handleRestoreLocalBackup = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (currentUser.role !== 'ADMIN') {
+      showNotification('error', 'Chỉ tài khoản Admin được khôi phục toàn bộ dữ liệu cục bộ.');
+      event.target.value = '';
+      return;
+    }
+
+    try {
+      const parsed: unknown = JSON.parse(await file.text());
+      const restored = parseLocalDataBackup(parsed, surveyors, departments);
+      if (restored.households.length === 0 || restored.areas.length === 0) {
+        throw new Error('Bản sao lưu không có hộ hoặc địa bàn; dữ liệu hiện tại chưa bị thay đổi.');
+      }
+      const confirmed = window.confirm(
+        `Khôi phục ${file.name}?\n\n` +
+        `Trong file: ${restored.communes.length} xã, ${restored.areas.length} địa bàn, ${restored.households.length} hộ.\n` +
+        `Hiện tại: ${communes.length} xã, ${areas.length} địa bàn, ${households.length} hộ.\n\n` +
+        `Dữ liệu hiện tại sẽ được lưu thành bản dự phòng cục bộ trước khi thay thế.`
+      );
+      if (!confirmed) return;
+
+      await saveLocalDataSnapshot(
+        restored,
+        { communes, areas, households, surveyors, departments }
+      );
+      setCommunes(restored.communes);
+      setAreas(restored.areas);
+      setHouseholds(restored.households);
+      setSurveyors(restored.surveyors);
+      setDepartments(restored.departments);
+      setSelectedCommuneId('ALL');
+      setSelectedAreaId('ALL');
+      setCurrentPage(1);
+      showNotification(
+        'success',
+        `Đã khôi phục ${restored.communes.length} xã, ${restored.areas.length} địa bàn và ${restored.households.length} hộ trên máy này.`
+      );
+    } catch (err) {
+      showNotification('error', `Không thể khôi phục bản sao lưu: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      event.target.value = '';
+    }
+  };
+
   const handleApplyWorkPackage = async (workPackage: SurveyWorkPackage) => {
     if (workPackage.purpose === 'ASSIGNMENT') {
       if (currentUser.role !== 'SURVEYOR') {
@@ -3229,7 +3364,6 @@ export default function App() {
       setSurveyors(nextSurveyors);
       localStorage.setItem('cached_communes', JSON.stringify(nextCommunes));
       localStorage.setItem('cached_areas', JSON.stringify(nextAreas));
-      localStorage.setItem('cached_households', JSON.stringify(nextHouseholds));
       localStorage.setItem('cached_surveyors', JSON.stringify(nextSurveyors));
       return {
         updatedCount: assignmentUpdatedCount,
@@ -3372,7 +3506,6 @@ export default function App() {
     }
 
     setHouseholds(nextHouseholds);
-    localStorage.setItem('cached_households', JSON.stringify(nextHouseholds));
     let progressSynced = true;
     try {
       const snapshots = processedAreas.map(item => createAreaProgressSnapshot(
@@ -5018,6 +5151,13 @@ export default function App() {
   }
 
   if (!isLoggedIn) {
+    if (!localDataReady) {
+      return (
+        <div className="min-h-screen bg-sky-950 text-white flex items-center justify-center text-sm font-semibold">
+          Đang mở dữ liệu cục bộ trên thiết bị...
+        </div>
+      );
+    }
     return (
       <div className="min-h-screen bg-linear-to-b from-sky-900 via-sky-850 to-slate-900 text-slate-900 flex flex-col items-center justify-center p-4 selection:bg-sky-200">
         {notification && (
@@ -5636,6 +5776,42 @@ export default function App() {
               <span className="text-slate-600 font-medium text-xs hidden lg:inline mr-1">
                 Hiển thị: <strong className="text-sky-800 font-bold">{filteredHouseholds.length}</strong> / {households.length} hộ
               </span>
+            )}
+
+            {currentUser.role === 'ADMIN' && (
+              <>
+                <button
+                  type="button"
+                  onClick={handleExportLocalBackup}
+                  className="h-8 px-3 bg-slate-700 hover:bg-slate-600 text-white rounded border border-slate-600 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  title="Tải bản sao lưu đầy đủ dữ liệu cục bộ về thiết bị"
+                >
+                  <Database className="w-4 h-4" />
+                  <span>Sao lưu JSON</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportPreRestoreBackup}
+                  className="h-8 px-3 bg-slate-600 hover:bg-slate-500 text-white rounded border border-slate-500 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  title="Tải bản sao lưu được giữ lại trước lần khôi phục gần nhất"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>Tải backup cũ</span>
+                </button>
+                <label
+                  className="h-8 px-3 bg-amber-700 hover:bg-amber-600 text-white rounded border border-amber-600 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  title="Khôi phục toàn bộ dữ liệu từ file backup JSON trên thiết bị"
+                >
+                  <Upload className="w-4 h-4" />
+                  <span>Khôi phục backup JSON</span>
+                  <input
+                    type="file"
+                    accept=".json,application/json"
+                    className="hidden"
+                    onChange={handleRestoreLocalBackup}
+                  />
+                </label>
+              </>
             )}
 
             <button 

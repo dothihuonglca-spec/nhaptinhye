@@ -203,7 +203,11 @@ export default function AreaDataTransferModal({
               surveyorName: surveyor.name,
               area,
               commune,
-              households: payload.households
+              households: payload.households.map(household => ({
+                ...household,
+                assignedSurveyorId: surveyor.id,
+                assignedSurveyorName: surveyor.name
+              }))
             };
           })
       );

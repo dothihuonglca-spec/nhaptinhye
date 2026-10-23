@@ -1,0 +1,253 @@
+import type { Department, Surveyor } from '../types/user';
+import type { Commune, Household, SurveyArea } from '../types';
+
+export interface LocalDataSnapshot {
+  communes: Commune[];
+  areas: SurveyArea[];
+  households: Household[];
+  surveyors: Surveyor[];
+  departments: Department[];
+}
+
+const DATABASE_NAME = 'survey-local-data';
+const STORE_NAME = 'snapshots';
+const CURRENT_KEY = 'current';
+const PRE_RESTORE_KEY = 'pre-restore';
+
+function openDatabase(): Promise<IDBDatabase> {
+  return new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) {
+      reject(new Error('Trình duyệt này không hỗ trợ IndexedDB để lưu bản kê dung lượng lớn.'));
+      return;
+    }
+    const request = indexedDB.open(DATABASE_NAME, 1);
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(STORE_NAME);
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error('Không mở được kho dữ liệu cục bộ.'));
+  });
+}
+
+export async function loadLocalDataSnapshot(): Promise<LocalDataSnapshot | null> {
+  return loadSnapshotByKey(CURRENT_KEY);
+}
+
+export async function loadPreRestoreSnapshot(): Promise<LocalDataSnapshot | null> {
+  return loadSnapshotByKey(PRE_RESTORE_KEY);
+}
+
+async function loadSnapshotByKey(key: string): Promise<LocalDataSnapshot | null> {
+  const database = await openDatabase();
+  try {
+    return await new Promise((resolve, reject) => {
+      const request = database.transaction(STORE_NAME, 'readonly')
+        .objectStore(STORE_NAME)
+        .get(key);
+      request.onsuccess = () => resolve((request.result as LocalDataSnapshot | undefined) || null);
+      request.onerror = () => reject(request.error || new Error('Không đọc được dữ liệu cục bộ.'));
+    });
+  } finally {
+    database.close();
+  }
+}
+
+export async function saveLocalDataSnapshot(
+  snapshot: LocalDataSnapshot,
+  preRestoreSnapshot?: LocalDataSnapshot
+): Promise<void> {
+  const database = await openDatabase();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const transaction = database.transaction(STORE_NAME, 'readwrite');
+      const store = transaction.objectStore(STORE_NAME);
+      store.put(snapshot, CURRENT_KEY);
+      if (preRestoreSnapshot) store.put(preRestoreSnapshot, PRE_RESTORE_KEY);
+      transaction.oncomplete = () => resolve();
+      transaction.onerror = () => reject(transaction.error || new Error('Không lưu được dữ liệu cục bộ.'));
+      transaction.onabort = () => reject(transaction.error || new Error('Đã hủy lưu dữ liệu cục bộ.'));
+    });
+  } finally {
+    database.close();
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function text(value: unknown, fallback = ''): string {
+  if (typeof value === 'number') return String(value);
+  return typeof value === 'string' && value !== '' ? value : fallback;
+}
+
+function number(value: unknown, fallback = 0): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+export function parseLocalDataBackup(
+  value: unknown,
+  currentSurveyors: Surveyor[],
+  currentDepartments: Department[]
+): LocalDataSnapshot {
+  if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.communes) || !Array.isArray(value.areas)) {
+    throw new Error('File không đúng định dạng bản sao lưu cục bộ (cần version 1, communes và areas).');
+  }
+
+  const communes = value.communes.filter(isRecord).map(raw => ({
+    ...raw,
+    id: text(raw.id),
+    tkcsCode: text(raw.tkcsCode),
+    tkcsName: text(raw.tkcsName),
+    communeCode: text(raw.communeCode),
+    communeName: text(raw.communeName)
+  })) as Commune[];
+  if (communes.length !== value.communes.length || communes.some(commune =>
+    !commune.id || !commune.communeCode || !commune.communeName
+  )) {
+    throw new Error('Danh sách xã trong file sao lưu thiếu mã hoặc tên xã.');
+  }
+
+  const areaRecords = value.areas.filter(isRecord);
+  if (areaRecords.length !== value.areas.length) {
+    throw new Error('Danh sách địa bàn trong file sao lưu không hợp lệ.');
+  }
+  if (areaRecords.some(area =>
+    Array.isArray(area.households) && area.households.some(household => !isRecord(household))
+  )) {
+    throw new Error('Có hộ trong danh sách địa bàn không đúng định dạng.');
+  }
+  const nestedHouseholds = areaRecords.flatMap(area =>
+    Array.isArray(area.households)
+      ? area.households.map(household => ({ area, household: household as Record<string, unknown> }))
+      : []
+  );
+  if (Array.isArray(value.households) && value.households.some(household => !isRecord(household))) {
+    throw new Error('Danh sách hộ trong file sao lưu không hợp lệ.');
+  }
+  const rootHouseholds = Array.isArray(value.households)
+    ? value.households.filter(isRecord)
+    : [];
+  const householdsById = new Map<string, {
+    area?: Record<string, unknown>;
+    household: Record<string, unknown>;
+  }>();
+  nestedHouseholds.forEach(({ area, household }) => {
+    const id = text(household.id);
+    if (id) householdsById.set(id, { area, household });
+  });
+  rootHouseholds.forEach(household => {
+    const id = text(household.id);
+    if (!id) return;
+    const nested = householdsById.get(id);
+    householdsById.set(id, {
+      area: nested?.area,
+      household: { ...nested?.household, ...household }
+    });
+  });
+  const householdsSource = Array.from(householdsById.values());
+
+  const areas = areaRecords.map(raw => {
+    const firstHousehold = Array.isArray(raw.households)
+      ? raw.households.find(isRecord)
+      : undefined;
+    const communeCode = text(raw.communeCode, text(firstHousehold?.communeCode));
+    const commune = communes.find(item => item.communeCode === communeCode);
+    const id = text(raw.id, text(raw.areaId));
+    const code = text(raw.code, text(raw.areaCode, id.split('-').pop() || ''));
+    const name = text(raw.name, text(raw.areaName, text(firstHousehold?.areaName, `Địa bàn ${code}`)));
+    return {
+      id,
+      communeId: text(raw.communeId, commune?.id || ''),
+      communeCode,
+      code,
+      name,
+      householdCount: number(raw.householdCount, Array.isArray(raw.households) ? raw.households.length : 0)
+    };
+  });
+  if (areas.some(area => !area.id || !area.code || !area.communeId)) {
+    throw new Error('Có địa bàn thiếu mã địa bàn hoặc không ghép được với xã trong file sao lưu.');
+  }
+
+  const households = householdsSource.map(({ area, household: raw }) => {
+    const areaId = text(raw.areaId, area ? text(area.id, text(area.areaId)) : '');
+    const areaData = areas.find(item => item.id === areaId) ||
+      (area ? areas.find(item => item.id === text(area.id, text(area.areaId))) : undefined);
+    const communeCode = text(raw.communeCode, areaData?.communeCode || '');
+    const commune = communes.find(item => item.communeCode === communeCode);
+    const sectorCodeValue = number(raw.sectorCode, 1);
+    const sectorCode = ([1, 2, 3, 4].includes(sectorCodeValue) ? sectorCodeValue : 1) as Household['sectorCode'];
+    const assignedSurveyorId = text(raw.assignedSurveyorId, area ? text(area.ownerId) : '');
+    const assignedSurveyorName = text(raw.assignedSurveyorName, area ? text(area.ownerName) : '');
+    return {
+      ...raw,
+      id: text(raw.id),
+      communeId: text(raw.communeId, areaData?.communeId || commune?.id || ''),
+      tkcsCode: text(raw.tkcsCode, commune?.tkcsCode || ''),
+      tkcsName: text(raw.tkcsName, commune?.tkcsName || ''),
+      communeCode,
+      communeName: text(raw.communeName, commune?.communeName || ''),
+      areaId: areaData?.id || areaId,
+      areaCode: text(raw.areaCode, areaData?.code || ''),
+      areaName: text(raw.areaName, areaData?.name || ''),
+      sttMau: text(raw.sttMau),
+      sampleStatus: text(raw.sampleStatus, 'CHÍNH THỨC'),
+      sttGoc: text(raw.sttGoc),
+      householdHead: text(raw.householdHead),
+      address: text(raw.address),
+      phone: text(raw.phone),
+      membersCount: number(raw.membersCount),
+      workingMembersCount: number(raw.workingMembersCount),
+      sectorCode,
+      sectorName: text(raw.sectorName),
+      note: text(raw.note),
+      assignedSurveyorId: assignedSurveyorId || undefined,
+      assignedSurveyorName: assignedSurveyorName || undefined
+    } as Household;
+  });
+  if (households.some(household => !household.id || !household.areaId || !household.communeId)) {
+    throw new Error('Có hộ thiếu mã hoặc không ghép được với địa bàn trong file sao lưu.');
+  }
+
+  if (Array.isArray(value.surveyors) && value.surveyors.some(surveyor =>
+    !isRecord(surveyor) || typeof surveyor.id !== 'string' ||
+    typeof surveyor.name !== 'string' || !Array.isArray(surveyor.assignedAreas) ||
+    !['ADMIN', 'MANAGER', 'SUPERVISOR', 'SURVEYOR'].includes(text(surveyor.role)) ||
+    !['ACTIVE', 'LOCKED', 'INACTIVE'].includes(text(surveyor.status))
+  )) {
+    throw new Error('Danh sách phân quyền ĐTV trong file sao lưu không hợp lệ.');
+  }
+  if (Array.isArray(value.departments) && value.departments.some(department =>
+    !isRecord(department) || typeof department.id !== 'string' || typeof department.name !== 'string'
+  )) {
+    throw new Error('Danh sách phòng/ban trong file sao lưu không hợp lệ.');
+  }
+
+  const importedSurveyors = Array.isArray(value.surveyors)
+    ? value.surveyors.filter(isRecord).map(raw => {
+      const existing = currentSurveyors.find(surveyor => surveyor.id === raw.id);
+      return { ...raw, password: existing?.password } as Surveyor;
+    })
+    : currentSurveyors;
+  currentSurveyors
+    .filter(surveyor => surveyor.role === 'ADMIN' && !importedSurveyors.some(item => item.id === surveyor.id))
+    .forEach(admin => importedSurveyors.push(admin));
+  const departments = Array.isArray(value.departments)
+    ? value.departments.filter(isRecord) as unknown as Department[]
+    : currentDepartments;
+
+  return { communes, areas, households, surveyors: importedSurveyors, departments };
+}
+
+export function serializeLocalDataBackup(snapshot: LocalDataSnapshot): string {
+  return JSON.stringify({
+    version: 1,
+    cachedAt: new Date().toISOString(),
+    communes: snapshot.communes,
+    areas: snapshot.areas,
+    households: snapshot.households,
+    surveyors: snapshot.surveyors.map(({ password: _password, ...surveyor }) => surveyor),
+    departments: snapshot.departments
+  }, null, 2);
+}

@@ -300,11 +300,7 @@ export function createAreaJson(
       const matchesSurveyor = h.assignedSurveyorId
         ? h.assignedSurveyorId === assignedSurveyor.id
         : !h.assignedSurveyorName || h.assignedSurveyorName === assignedSurveyor.name;
-      return hasAreaAssignment
-        ? matchesSurveyor
-        : Boolean(h.assignedSurveyorId === assignedSurveyor.id || (
-          !h.assignedSurveyorId && h.assignedSurveyorName === assignedSurveyor.name
-        ));
+      return hasAreaAssignment || matchesSurveyor;
     });
   }
 
