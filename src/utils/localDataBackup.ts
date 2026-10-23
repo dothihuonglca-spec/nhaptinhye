@@ -129,7 +129,11 @@ export function parseLocalDataBackup(
     throw new Error('Danh sách hộ trong file sao lưu không hợp lệ.');
   }
 
-  let areaRecords = recordsFrom(value.areas) || recordsFrom(value.surveyAreas);
+  const areasFromAreas = recordsFrom(value.areas);
+  const areasFromSurveyAreas = recordsFrom(value.surveyAreas);
+  let areaRecords = areasFromAreas?.length
+    ? areasFromAreas
+    : areasFromSurveyAreas;
   if (areaRecords === null) {
     const nestedCommuneAreas = value.communes.flatMap(rawCommune => {
       if (!isRecord(rawCommune)) return [];
