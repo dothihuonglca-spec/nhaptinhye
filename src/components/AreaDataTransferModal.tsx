@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { 
   Download, Upload, FileJson, X, CheckCircle2, AlertCircle, 
   Send, Database, ArrowRight, UserCheck, MapPin, RefreshCw, Layers
@@ -15,6 +15,7 @@ import {
   createSurveyWorkPackage,
   parseSurveyWorkPackage,
   isAreaAssigned,
+  normalizeSurveyorName,
   SurveyWorkPackage
 } from '../utils/areaDataTransfer';
 
@@ -74,27 +75,74 @@ export default function AreaDataTransferModal({
   }[]>([]);
   const [isProcessingImport, setIsProcessingImport] = useState(false);
 
+  const areasBySurveyorId = useMemo(() => {
+    const areaById = new Map(areas.map(area => [area.id, area]));
+    const areaByCommuneAndCode = new Map<string, SurveyArea>();
+    areas.forEach(area => {
+      areaByCommuneAndCode.set(`${area.communeId}_${area.code}`, area);
+      if (area.communeCode) {
+        areaByCommuneAndCode.set(`${area.communeCode}_${area.code}`, area);
+      }
+    });
+    const eligibleSurveyorIds = new Set(
+      surveyors.filter(surveyor => surveyor.role === 'SURVEYOR').map(surveyor => surveyor.id)
+    );
+    const surveyorNameCounts = new Map<string, number>();
+    surveyors.filter(surveyor => surveyor.role === 'SURVEYOR').forEach(surveyor => {
+      const normalizedName = normalizeSurveyorName(surveyor.name);
+      surveyorNameCounts.set(normalizedName, (surveyorNameCounts.get(normalizedName) || 0) + 1);
+    });
+    const uniqueSurveyorIdByName = new Map<string, string>();
+    surveyors.filter(surveyor => surveyor.role === 'SURVEYOR').forEach(surveyor => {
+      const normalizedName = normalizeSurveyorName(surveyor.name);
+      if (surveyorNameCounts.get(normalizedName) === 1) {
+        uniqueSurveyorIdByName.set(normalizedName, surveyor.id);
+      }
+    });
+    const directAreaIdsBySurveyor = new Map<string, Set<string>>();
+    households.forEach(household => {
+      const ids = new Set<string>();
+      if (household.assignedSurveyorId && eligibleSurveyorIds.has(household.assignedSurveyorId)) {
+        ids.add(household.assignedSurveyorId);
+      }
+      if (household.assignedSurveyorName) {
+        const normalizedName = normalizeSurveyorName(household.assignedSurveyorName);
+        const matchingSurveyorId = uniqueSurveyorIdByName.get(normalizedName);
+        if (matchingSurveyorId) ids.add(matchingSurveyorId);
+      }
+      if (ids.size === 0) return;
+
+      const area = areaById.get(household.areaId) ||
+        areaByCommuneAndCode.get(`${household.communeId}_${household.areaCode}`) ||
+        areaByCommuneAndCode.get(`${household.communeCode}_${household.areaCode}`);
+      if (!area) return;
+      ids.forEach(id => {
+        const directAreaIds = directAreaIdsBySurveyor.get(id) || new Set<string>();
+        directAreaIds.add(area.id);
+        directAreaIdsBySurveyor.set(id, directAreaIds);
+      });
+    });
+
+    return new Map(surveyors.filter(surveyor => surveyor.role === 'SURVEYOR').map(surveyor => {
+      const departmentAreaKeys = departments.find(item =>
+        item.id === surveyor.departmentId || item.name === surveyor.department
+      )?.assignedAreaCodes || [];
+      const assignedCommunes = new Set(surveyor.assignedCommunes || []);
+      const directAreaIds = directAreaIdsBySurveyor.get(surveyor.id) || new Set<string>();
+      const assignedAreas = areas.filter(area =>
+        isAreaAssigned(area, [...(surveyor.assignedAreas || []), ...departmentAreaKeys]) ||
+        directAreaIds.has(area.id) ||
+        assignedCommunes.has(area.communeId) ||
+        Boolean(area.communeCode && assignedCommunes.has(area.communeCode))
+      );
+      return [surveyor.id, assignedAreas] as const;
+    }));
+  }, [areas, departments, households, surveyors]);
+
   if (!isOpen) return null;
 
   const getAreasForSurveyor = (surveyor: Surveyor): SurveyArea[] => {
-    const directAssignedAreaIds = new Set(
-      households
-        .filter(h => h.assignedSurveyorId === surveyor.id)
-        .flatMap(h => areas
-          .filter(area =>
-            area.id === h.areaId ||
-            (area.code === h.areaCode && (
-              area.communeId === h.communeId ||
-              area.communeCode === h.communeCode
-            ))
-          )
-          .map(area => area.id)
-        )
-    );
-    return areas.filter(area =>
-      isAreaAssigned(area, surveyor.assignedAreas || []) ||
-      directAssignedAreaIds.has(area.id)
-    );
+    return areasBySurveyorId.get(surveyor.id) || [];
   };
 
   const supervisorDepartment = departments.find(d =>
@@ -133,9 +181,9 @@ export default function AreaDataTransferModal({
     ? [currentUser]
     : surveyors.filter(s =>
       s.role === 'SURVEYOR' &&
-      getAreasForSurveyor(s).some(area =>
+      (currentUser.role === 'ADMIN' || getAreasForSurveyor(s).some(area =>
         permittedAreas.some(allowed => allowed.id === area.id)
-      )
+      ))
     );
   const selectedSurveyors = !canSelectSurveyors
     ? [currentUser]
@@ -170,7 +218,18 @@ export default function AreaDataTransferModal({
       ? availableAreas
       : availableAreas.filter(a => a.id === selectedAreaId);
     if (selectedAreaList.length === 0 || selectedSurveyors.length === 0) {
-      showNotification('error', 'Không tìm thấy ĐTV hoặc địa bàn được phân quyền để xuất.');
+      const selectedSurveyor = selectedSurveyors[0];
+      const assignedCount = selectedSurveyor
+        ? getAreasForSurveyor(selectedSurveyor).filter(area =>
+          permittedAreas.some(allowed => allowed.id === area.id)
+        ).length
+        : 0;
+      showNotification(
+        'error',
+        selectedSurveyor && assignedCount === 0
+          ? `ĐTV ${selectedSurveyor.name} chưa được phân công địa bàn. Đổi vai trò sang ĐTV chưa tự cấp địa bàn; hãy gán địa bàn cho tài khoản trước khi xuất.`
+          : 'Không tìm thấy địa bàn trong phạm vi được phép xuất.'
+      );
       return;
     }
 
@@ -414,12 +473,19 @@ export default function AreaDataTransferModal({
                     <option value="">-- Tất cả Điều tra viên --</option>
                     {eligibleSurveyors.map(s => (
                       <option key={s.id} value={s.id}>
-                        {s.name} ({s.code} - {s.username}) - Phụ trách: {(s.assignedAreas || []).length} địa bàn
+                        {s.name} ({s.code} - {s.username}) - Phụ trách: {getAreasForSurveyor(s).length} địa bàn
                       </option>
                     ))}
                   </select>
                 </div>
               )}
+              {canSelectSurveyors && selectedSurveyorId &&
+                selectedSurveyors.length > 0 &&
+                getAreasForSurveyor(selectedSurveyors[0]).length === 0 && (
+                  <div className="rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900">
+                    Tài khoản này đã có vai trò ĐTV nhưng chưa có địa bàn được giao. Đổi vai trò không tự tạo phân quyền địa bàn; hãy vào <strong>Quản lý cán bộ</strong> để gán địa bàn trước khi xuất.
+                  </div>
+                )}
 
               {/* Lựa chọn Địa bàn cụ thể */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">

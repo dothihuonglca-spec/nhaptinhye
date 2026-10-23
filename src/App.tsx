@@ -50,6 +50,7 @@ import {
   AreaProgressSnapshot,
   createAreaProgressSnapshot,
   parseSurveyWorkPackage,
+  normalizeSurveyorName,
   SurveyWorkPackage,
   isAreaAssigned
 } from './utils/areaDataTransfer';
@@ -57,6 +58,7 @@ import {
   loadPreRestoreSnapshot,
   loadLocalDataSnapshot,
   inspectLocalDataBackup,
+  parseSurveyorEntryBackup,
   parseLocalDataBackup,
   saveLocalDataSnapshot,
   serializeLocalDataBackup
@@ -168,6 +170,10 @@ const SECTOR_NAMES = {
   4: "Nguồn thu khác / Lương"
 };
 
+function householdCompositeKey(household: Pick<Household, 'communeCode' | 'areaCode' | 'sttMau'>): string {
+  return `${household.communeCode}_${household.areaCode}_${household.sttMau}`;
+}
+
 export default function App() {
   // Chế độ phân hệ phần mềm riêng biệt:
   // 'industrial': Phần mềm Nhập tin & Tổng hợp Điều tra Công nghiệp (DN & Cá thể)
@@ -193,16 +199,23 @@ export default function App() {
         const parsed = JSON.parse(cached);
         if (Array.isArray(parsed) && parsed.length > 0) {
           const merged = new Map<string, Commune>();
+          const keyById = new Map<string, string>();
+          const keyByCode = new Map<string, string>();
           OFFICIAL_COMMUNES_CATALOG.forEach(commune =>
-            merged.set(commune.communeCode || commune.id, commune)
+            {
+              const key = commune.communeCode || commune.id;
+              merged.set(key, commune);
+              keyById.set(commune.id, key);
+              if (commune.communeCode) keyByCode.set(commune.communeCode, key);
+            }
           );
           parsed.forEach((commune: Commune) => {
-            const existingKey = Array.from(merged.entries()).find(([, existing]) =>
-              existing.id === commune.id ||
-              (existing.communeCode && existing.communeCode === commune.communeCode)
-            )?.[0];
+            const existingKey = keyById.get(commune.id) ||
+              (commune.communeCode ? keyByCode.get(commune.communeCode) : undefined);
             const key = existingKey || commune.communeCode || commune.id;
             merged.set(key, { ...merged.get(key), ...commune });
+            keyById.set(commune.id, key);
+            if (commune.communeCode) keyByCode.set(commune.communeCode, key);
           });
           return Array.from(merged.values());
         }
@@ -2498,6 +2511,23 @@ export default function App() {
   }, [communes, selectedCommuneId]);
 
   const filteredHouseholds = useMemo(() => {
+    const communeByIdOrCode = new Map<string, Commune>();
+    communes.forEach(commune => {
+      communeByIdOrCode.set(commune.id, commune);
+      if (commune.communeCode) communeByIdOrCode.set(commune.communeCode, commune);
+    });
+    const supervisorCommuneKeys = new Set<string>();
+    if (currentUser.role === 'SUPERVISOR' && currentUser.assignedCommunes &&
+      !currentUser.assignedCommunes.includes('ALL')) {
+      const assigned = new Set(currentUser.assignedCommunes);
+      communes.forEach(commune => {
+        if (assigned.has(commune.id) || assigned.has(commune.communeCode)) {
+          supervisorCommuneKeys.add(commune.id);
+          supervisorCommuneKeys.add(commune.communeCode);
+        }
+      });
+    }
+
     // Đối tượng xã đang chọn nếu có
     const selCommune = selectedCommuneId !== 'ALL'
       ? (communes.find(c => c.id === selectedCommuneId || c.communeCode === selectedCommuneId) || null)
@@ -2511,7 +2541,8 @@ export default function App() {
     return households.filter(h => {
       // 1. Lọc theo TKCS (Chỉ áp dụng khi chưa lọc cụ thể theo Xã)
       if (selectedTkcs !== 'ALL' && selectedCommuneId === 'ALL') {
-        const commOfH = communes.find(c => c.id === h.communeId || (c.communeCode && c.communeCode === h.communeCode));
+        const commOfH = communeByIdOrCode.get(h.communeId) ||
+          (h.communeCode ? communeByIdOrCode.get(h.communeCode) : undefined);
         const effectiveTkcs = (h.tkcsCode && !h.tkcsCode.startsWith('TKCS-') && h.tkcsCode !== 'TKCS') 
           ? h.tkcsCode 
           : (commOfH?.tkcsCode || h.tkcsCode || '');
@@ -2553,9 +2584,8 @@ export default function App() {
           if (!isDirect && !isAreaMatch) return false;
         } else if (currentUser.role === 'SUPERVISOR') {
           if (currentUser.assignedCommunes && !currentUser.assignedCommunes.includes('ALL')) {
-            const matchesCommune = currentUser.assignedCommunes.includes(h.communeId) || 
-                                   (Boolean(h.communeCode) && currentUser.assignedCommunes.includes(h.communeCode)) ||
-                                   communes.some(c => (currentUser.assignedCommunes?.includes(c.id) || currentUser.assignedCommunes?.includes(c.communeCode)) && (c.id === h.communeId || c.communeCode === h.communeCode));
+            const matchesCommune = supervisorCommuneKeys.has(h.communeId) ||
+              supervisorCommuneKeys.has(h.communeCode);
             if (!matchesCommune) return false;
           }
         }
@@ -3240,18 +3270,33 @@ export default function App() {
       }
       if (currentUser.role === 'SURVEYOR') {
         const assignedAreaKeys = currentUser.assignedAreas || [];
-        const hasOutOfScopeArea = restored.areas.some(area => {
-          const hasDirectlyAssignedHousehold = restored.households.some(household =>
-            household.assignedSurveyorId === currentUser.id &&
-            (household.areaId === area.id ||
-              (household.areaCode === area.code &&
-                (household.communeId === area.communeId || household.communeCode === area.communeCode)))
-          );
-          return !isAreaAssigned(area, assignedAreaKeys) && !hasDirectlyAssignedHousehold;
+        const directlyAssignedAreaKeys = new Set<string>();
+        restored.households.forEach(household => {
+          const matchesCurrentSurveyor =
+            household.assignedSurveyorId === currentUser.id ||
+            normalizeSurveyorName(household.assignedSurveyorName || '') ===
+              normalizeSurveyorName(currentUser.name);
+          if (!matchesCurrentSurveyor) return;
+          directlyAssignedAreaKeys.add(household.areaId);
+          directlyAssignedAreaKeys.add(`${household.communeId}_${household.areaCode}`);
+          directlyAssignedAreaKeys.add(`${household.communeCode}_${household.areaCode}`);
         });
-        if (hasOutOfScopeArea || restored.households.some(household =>
-          household.assignedSurveyorId !== currentUser.id
-        )) {
+        const areaById = new Map(restored.areas.map(area => [area.id, area]));
+        const hasOutOfScopeArea = restored.areas.some(area =>
+          !isAreaAssigned(area, assignedAreaKeys) &&
+          !directlyAssignedAreaKeys.has(area.id) &&
+          !directlyAssignedAreaKeys.has(`${area.communeId}_${area.code}`) &&
+          !directlyAssignedAreaKeys.has(`${area.communeCode}_${area.code}`)
+        );
+        const hasOutOfScopeHousehold = restored.households.some(household => {
+          const area = areaById.get(household.areaId);
+          const isDirectlyAssigned =
+            household.assignedSurveyorId === currentUser.id ||
+            normalizeSurveyorName(household.assignedSurveyorName || '') ===
+              normalizeSurveyorName(currentUser.name);
+          return !isDirectlyAssigned && !(area && isAreaAssigned(area, assignedAreaKeys));
+        });
+        if (hasOutOfScopeArea || hasOutOfScopeHousehold) {
           throw new Error('Backup có địa bàn hoặc hộ ngoài phạm vi của ĐTV đang đăng nhập; dữ liệu hiện tại chưa bị thay đổi.');
         }
       }
@@ -3289,6 +3334,119 @@ export default function App() {
     }
   };
 
+  const handleRestoreSurveyorEntryBackup = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (currentUser.role !== 'SURVEYOR') {
+      showNotification('error', 'Chức năng này chỉ dành cho ĐTV để khôi phục phiếu của mình.');
+      event.target.value = '';
+      return;
+    }
+
+    try {
+      const parsed: unknown = JSON.parse(await file.text());
+      const backup = parseSurveyorEntryBackup(parsed);
+      const householdsById = new Map(households.map(household => [household.id, household]));
+      const areaById = new Map(areas.map(area => [area.id, area]));
+      const allowedAreaKeys = new Set(currentUser.assignedAreas || []);
+      const eligibleEntries = new Map<string, typeof backup.entries[number]>();
+      let unmatchedCount = 0;
+      let outOfScopeCount = 0;
+
+      backup.entries.forEach(entry => {
+        const household = householdsById.get(entry.id);
+        if (!household) {
+          unmatchedCount++;
+          return;
+        }
+
+        const area = areaById.get(household.areaId) ||
+          areas.find(item =>
+            item.code === household.areaCode &&
+            (item.communeId === household.communeId || item.communeCode === household.communeCode)
+          );
+        const isAssignedToUser = household.assignedSurveyorId
+          ? household.assignedSurveyorId === currentUser.id
+          : Boolean(area && isAreaAssigned(area, Array.from(allowedAreaKeys)));
+        const expectedAreaKeys = [
+          household.areaId,
+          area?.id,
+          `${household.communeCode}${household.areaCode}`,
+          `${household.communeCode}_${household.areaCode}`,
+          `${household.communeId}_${household.areaCode}`,
+          `${household.communeCode}-${household.areaCode}`
+        ].filter((key): key is string => Boolean(key));
+        if (!isAssignedToUser || !expectedAreaKeys.includes(entry.areaKey)) {
+          outOfScopeCount++;
+          return;
+        }
+        eligibleEntries.set(entry.id, entry);
+      });
+
+      if (eligibleEntries.size === 0) {
+        throw new Error(
+          `Không tìm thấy phiếu nào khớp với hộ được giao trên máy này (${unmatchedCount} mã hộ không có trong bảng kê, ${outOfScopeCount} bản ghi ngoài phạm vi hoặc sai mã địa bàn). Hãy nạp đúng gói phân công trước.`
+        );
+      }
+
+      const skippedCount = backup.entries.length - eligibleEntries.size;
+      const confirmed = window.confirm(
+        `Khôi phục ${eligibleEntries.size}/${backup.entries.length} phiếu từ ${file.name}?\n\n` +
+        `${unmatchedCount} mã hộ không có trong bảng kê hiện tại; ${outOfScopeCount} bản ghi không khớp địa bàn được giao. ` +
+        `Các hộ ngoài phạm vi sẽ không bị thay đổi.`
+      );
+      if (!confirmed) return;
+
+      const restoredAt = backup.exportedAt || new Date().toISOString();
+      const nextHouseholds = households.map(household => {
+        const entry = eligibleEntries.get(household.id);
+        if (!entry) return household;
+        return {
+          ...household,
+          ...(entry.membersCount !== undefined ? { membersCount: entry.membersCount } : {}),
+          ...(entry.membersCountEntered !== undefined
+            ? { membersCountEntered: entry.membersCountEntered }
+            : {}),
+          ...(entry.workingMembersCount !== undefined
+            ? { workingMembersCount: entry.workingMembersCount }
+            : {}),
+          questionnaire: {
+            ...household.questionnaire,
+            ...entry.questionnaire
+          },
+          surveyStatus: entry.surveyStatus ||
+            (household.surveyStatus && household.surveyStatus !== 'CHUA_NHAP'
+              ? household.surveyStatus
+              : 'DANG_NHAP'),
+          updatedAt: entry.updatedAt || restoredAt,
+          updatedBy: entry.updatedBy || currentUser.name
+        };
+      });
+
+      await saveLocalDataSnapshot({
+        communes,
+        areas,
+        households: nextHouseholds,
+        surveyors,
+        departments
+      });
+      setHouseholds(nextHouseholds);
+      setCurrentPage(1);
+      showNotification(
+        'success',
+        `Đã khôi phục ${eligibleEntries.size} phiếu của ${currentUser.name} vào bộ nhớ cục bộ.` +
+          (skippedCount ? ` Bỏ qua ${skippedCount} bản ghi không khớp.` : '')
+      );
+    } catch (err) {
+      showNotification(
+        'error',
+        `Không thể khôi phục backup phiếu ĐTV: ${err instanceof Error ? err.message : String(err)}`
+      );
+    } finally {
+      event.target.value = '';
+    }
+  };
+
   const handleApplyWorkPackage = async (workPackage: SurveyWorkPackage) => {
     if (workPackage.purpose === 'ASSIGNMENT') {
       if (currentUser.role !== 'SURVEYOR') {
@@ -3306,6 +3464,12 @@ export default function App() {
       const nextCommunes = [...communes];
       const nextAreas = [...areas];
       const nextHouseholds = [...households];
+      const householdIndexById = new Map(nextHouseholds.map((household, index) => [household.id, index]));
+      const householdIndexByCompositeKey = new Map<string, number>();
+      nextHouseholds.forEach((household, index) => {
+        const key = householdCompositeKey(household);
+        if (!householdIndexByCompositeKey.has(key)) householdIndexByCompositeKey.set(key, index);
+      });
       const assignedAreaIds = new Set(currentUser.assignedAreas || []);
       let assignmentUpdatedCount = 0;
       let assignmentNewCount = 0;
@@ -3348,12 +3512,9 @@ export default function App() {
             throw new Error(`Hộ ${incoming.sttMau || incoming.id} không thuộc địa bàn ${entry.area.code}.`);
           }
 
-          const householdIndex = nextHouseholds.findIndex(existing =>
-            existing.id === incoming.id ||
-            (existing.communeCode === incoming.communeCode &&
-              existing.areaCode === incoming.areaCode &&
-              existing.sttMau === incoming.sttMau)
-          );
+          const householdIndex = householdIndexById.get(incoming.id) ??
+            householdIndexByCompositeKey.get(householdCompositeKey(incoming)) ??
+            -1;
           const existing = householdIndex >= 0 ? nextHouseholds[householdIndex] : undefined;
           const household: Household = {
             ...existing,
@@ -3375,6 +3536,9 @@ export default function App() {
             nextHouseholds.push(household);
             assignmentNewCount++;
           }
+          householdIndexById.set(household.id, householdIndex >= 0 ? householdIndex : nextHouseholds.length - 1);
+          const finalIndex = householdIndex >= 0 ? householdIndex : nextHouseholds.length - 1;
+          householdIndexByCompositeKey.set(householdCompositeKey(household), finalIndex);
         });
       });
 
@@ -3408,12 +3572,36 @@ export default function App() {
     }
 
     const nextHouseholds = [...households];
+    const householdIndexById = new Map(nextHouseholds.map((household, index) => [household.id, index]));
+    const householdIndexByCompositeKey = new Map<string, number>();
+    nextHouseholds.forEach((household, index) => {
+      const key = householdCompositeKey(household);
+      if (!householdIndexByCompositeKey.has(key)) householdIndexByCompositeKey.set(key, index);
+    });
     const processedAreas: { area: SurveyArea; commune: Commune; surveyorId: string; surveyorName: string }[] = [];
     let updatedCount = 0;
     const userDepartment = departments.find(department =>
       department.id === currentUser.departmentId || department.name === currentUser.department
     );
     for (const entry of workPackage.entries) {
+      const exactSurveyor = surveyors.find(surveyor =>
+        surveyor.id === entry.surveyorId && surveyor.role === 'SURVEYOR'
+      );
+      const nameMatches = surveyors.filter(surveyor =>
+        surveyor.role === 'SURVEYOR' &&
+        normalizeSurveyorName(surveyor.name) === normalizeSurveyorName(entry.surveyorName)
+      );
+      const resolvedSurveyor = exactSurveyor ||
+        (nameMatches.length === 1 ? nameMatches[0] : undefined);
+      if (!resolvedSurveyor) {
+        throw new Error(
+          nameMatches.length > 1
+            ? `Tên ĐTV "${entry.surveyorName}" trùng với nhiều tài khoản. Hãy sửa danh sách ĐTV để mỗi người có tên riêng rồi nhập lại.`
+            : `Không tìm thấy ĐTV "${entry.surveyorName}" trong danh sách máy quản lý. Kiểm tra mã tài khoản hoặc tên ĐTV trong file và hệ thống.`
+        );
+      }
+      const resolvedSurveyorId = resolvedSurveyor.id;
+      const resolvedSurveyorName = resolvedSurveyor.name;
       const localArea = areas.find(area =>
         area.id === entry.area.id ||
         (area.code === entry.area.code && (
@@ -3450,12 +3638,6 @@ export default function App() {
           throw new Error(`Tài khoản hiện tại không có quyền nạp kết quả địa bàn ${localArea.code}.`);
         }
       }
-      if (!surveyors.some(surveyor =>
-        surveyor.id === entry.surveyorId && surveyor.role === 'SURVEYOR'
-      )) {
-        throw new Error(`Không tìm thấy ĐTV ${entry.surveyorName} trong danh sách máy quản lý.`);
-      }
-
       for (const incoming of entry.households) {
         const hasSurveyData =
           incoming.surveyStatus === 'DANG_NHAP' ||
@@ -3484,12 +3666,9 @@ export default function App() {
           throw new Error(`Hộ ${incoming.sttMau || incoming.id} không thuộc địa bàn ${entry.area.code} trong gói kết quả.`);
         }
 
-        const householdIndex = nextHouseholds.findIndex(existing =>
-          existing.id === incoming.id ||
-          (existing.communeCode === incoming.communeCode &&
-            existing.areaCode === incoming.areaCode &&
-            existing.sttMau === incoming.sttMau)
-        );
+        const householdIndex = householdIndexById.get(incoming.id) ??
+          householdIndexByCompositeKey.get(householdCompositeKey(incoming)) ??
+          -1;
         if (householdIndex < 0) {
           throw new Error(`Không khớp được hộ ${incoming.sttMau || incoming.id} trong bảng kê địa bàn ${localArea.code}.`);
         }
@@ -3503,10 +3682,14 @@ export default function App() {
         ) {
           throw new Error(`Hộ ${incoming.sttMau || incoming.id} khớp với một địa bàn khác trong bảng kê.`);
         }
+        const existingNameMatches = normalizeSurveyorName(existing.assignedSurveyorName || '') ===
+          normalizeSurveyorName(resolvedSurveyorName);
+        const incomingNameMatches = normalizeSurveyorName(incoming.assignedSurveyorName || '') ===
+          normalizeSurveyorName(resolvedSurveyorName);
         if (
-          (existing.assignedSurveyorId && existing.assignedSurveyorId !== entry.surveyorId) ||
-          (!existing.assignedSurveyorId && existing.assignedSurveyorName &&
-            existing.assignedSurveyorName !== entry.surveyorName)
+          (existing.assignedSurveyorId && existing.assignedSurveyorId !== resolvedSurveyorId && !existingNameMatches) ||
+          (!existing.assignedSurveyorId && existing.assignedSurveyorName && !existingNameMatches) ||
+          (incoming.assignedSurveyorId && incoming.assignedSurveyorId !== entry.surveyorId && !incomingNameMatches)
         ) {
           throw new Error(`Hộ ${existing.sttMau || existing.id} đang thuộc ĐTV khác với gói kết quả.`);
         }
@@ -3517,39 +3700,52 @@ export default function App() {
         }
         nextHouseholds[householdIndex] = {
           ...existing,
-          assignedSurveyorId: existing.assignedSurveyorId || entry.surveyorId,
-          assignedSurveyorName: existing.assignedSurveyorName || entry.surveyorName,
+          assignedSurveyorId: resolvedSurveyorId,
+          assignedSurveyorName: resolvedSurveyorName,
           surveyStatus: incoming.surveyStatus || existing.surveyStatus,
           questionnaire: incoming.questionnaire || existing.questionnaire,
           updatedAt: incoming.updatedAt || workPackage.exportedAt,
-          updatedBy: incoming.updatedBy || entry.surveyorName,
+          updatedBy: incoming.updatedBy || resolvedSurveyorName,
           note: incoming.note || existing.note
         };
+        householdIndexById.set(existing.id, householdIndex);
+        householdIndexById.set(incoming.id, householdIndex);
+        householdIndexByCompositeKey.set(householdCompositeKey(existing), householdIndex);
         updatedCount++;
       }
       processedAreas.push({
         area: localArea,
         commune: localCommune,
-        surveyorId: entry.surveyorId,
-        surveyorName: entry.surveyorName
+        surveyorId: resolvedSurveyorId,
+        surveyorName: resolvedSurveyorName
       });
     }
 
     setHouseholds(nextHouseholds);
     let progressSynced = true;
     try {
+      const householdsByArea = new Map<string, Household[]>();
+      nextHouseholds.forEach(household => {
+        const keys = new Set([
+          household.areaId,
+          `${household.communeId}_${household.areaCode}`,
+          `${household.communeCode}_${household.areaCode}`
+        ].filter(Boolean));
+        keys.forEach(key => {
+          const areaHouseholds = householdsByArea.get(key) || [];
+          areaHouseholds.push(household);
+          householdsByArea.set(key, areaHouseholds);
+        });
+      });
       const snapshots = processedAreas.map(item => createAreaProgressSnapshot(
         item.surveyorId,
         item.surveyorName,
         item.area,
         item.commune,
-        nextHouseholds.filter(h =>
-          h.areaId === item.area.id ||
-          (h.areaCode === item.area.code && (
-            h.communeId === item.commune.id ||
-            h.communeCode === item.commune.communeCode
-          ))
-        ).filter(h =>
+        (householdsByArea.get(item.area.id) ||
+          householdsByArea.get(`${item.commune.id}_${item.area.code}`) ||
+          householdsByArea.get(`${item.commune.communeCode}_${item.area.code}`) ||
+          []).filter(h =>
           h.assignedSurveyorId
             ? h.assignedSurveyorId === item.surveyorId
             : !h.assignedSurveyorName || h.assignedSurveyorName === item.surveyorName
@@ -5865,6 +6061,19 @@ export default function App() {
                     accept=".json,application/json"
                     className="hidden"
                     onChange={handleRestoreLocalBackup}
+                  />
+                </label>
+                <label
+                  className="h-8 px-3 bg-teal-800 hover:bg-teal-700 text-white rounded border border-teal-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                  title="Nạp file backup.json chỉ chứa phiếu, ghép vào các hộ đã được giao cho tài khoản này"
+                >
+                  <Upload className="w-4 h-4" />
+                  <span>Khôi phục phiếu backup.json</span>
+                  <input
+                    type="file"
+                    accept=".json,application/json"
+                    className="hidden"
+                    onChange={handleRestoreSurveyorEntryBackup}
                   />
                 </label>
               </>

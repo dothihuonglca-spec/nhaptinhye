@@ -1,4 +1,5 @@
 import type { Department, Surveyor } from '../types/user';
+import { createDefaultQuestionnaire } from '../types';
 import type { Commune, Household, SurveyArea } from '../types';
 
 export interface LocalDataSnapshot {
@@ -19,6 +20,23 @@ export interface LocalDataBackupDiagnostics {
   householdRecordsWithAreaId: number;
   householdRecordsNestedUnderAreas: number;
   householdRecordsNestedUnderRosters: number;
+}
+
+export interface SurveyorEntryBackupRecord {
+  id: string;
+  areaKey: string;
+  questionnaire: NonNullable<Household['questionnaire']>;
+  surveyStatus?: Household['surveyStatus'];
+  membersCount?: number;
+  membersCountEntered?: boolean;
+  workingMembersCount?: number;
+  updatedAt?: string;
+  updatedBy?: string;
+}
+
+export interface SurveyorEntryBackup {
+  exportedAt?: string;
+  entries: SurveyorEntryBackupRecord[];
 }
 
 const DATABASE_NAME = 'survey-local-data';
@@ -147,6 +165,77 @@ function recordsFrom(value: unknown): Record<string, unknown>[] | null {
   return records as Record<string, unknown>[];
 }
 
+export function parseSurveyorEntryBackup(value: unknown): SurveyorEntryBackup {
+  if (!isRecord(value) || value.format !== 'tnh-entries-backup' || value.version !== 1) {
+    throw new Error('Đây không phải file backup phiếu ĐTV được hỗ trợ.');
+  }
+  if (!Array.isArray(value.entries) || value.entries.length === 0) {
+    throw new Error('File backup không có danh sách phiếu.');
+  }
+
+  const ids = new Set<string>();
+  const entries = value.entries.map((record): SurveyorEntryBackupRecord => {
+    if (
+      !isRecord(record) ||
+      typeof record.id !== 'string' ||
+      !record.id ||
+      typeof record.areaKey !== 'string' ||
+      !record.areaKey ||
+      !isRecord(record.questionnaire)
+    ) {
+      throw new Error('File backup có phiếu thiếu mã hộ, địa bàn hoặc nội dung phiếu.');
+    }
+    if (ids.has(record.id)) {
+      throw new Error('File backup có mã hộ bị lặp; chưa khôi phục dữ liệu nào.');
+    }
+    ids.add(record.id);
+
+    const validStatuses = [
+      'PENDING', 'IN_PROGRESS', 'COMPLETED', 'CHUA_NHAP',
+      'DANG_NHAP', 'HOAN_THANH', 'DA_HOAN_THANH', 'DA_DUYET'
+    ];
+    if (record.surveyStatus !== undefined &&
+      (typeof record.surveyStatus !== 'string' || !validStatuses.includes(record.surveyStatus))) {
+      throw new Error('File backup có trạng thái phiếu không hợp lệ.');
+    }
+    for (const field of ['membersCount', 'workingMembersCount'] as const) {
+      if (record[field] !== undefined &&
+        (typeof record[field] !== 'number' || !Number.isFinite(record[field]))) {
+        throw new Error('File backup có số liệu nhân khẩu không hợp lệ.');
+      }
+    }
+    if (record.membersCountEntered !== undefined && typeof record.membersCountEntered !== 'boolean') {
+      throw new Error('File backup có trạng thái nhập nhân khẩu không hợp lệ.');
+    }
+
+    return {
+      id: record.id,
+      areaKey: record.areaKey,
+      questionnaire: {
+        ...createDefaultQuestionnaire(),
+        ...record.questionnaire
+      },
+      ...(typeof record.surveyStatus === 'string'
+        ? { surveyStatus: record.surveyStatus as Household['surveyStatus'] }
+        : {}),
+      ...(typeof record.membersCount === 'number' ? { membersCount: record.membersCount } : {}),
+      ...(typeof record.membersCountEntered === 'boolean'
+        ? { membersCountEntered: record.membersCountEntered }
+        : {}),
+      ...(typeof record.workingMembersCount === 'number'
+        ? { workingMembersCount: record.workingMembersCount }
+        : {}),
+      ...(typeof record.updatedAt === 'string' ? { updatedAt: record.updatedAt } : {}),
+      ...(typeof record.updatedBy === 'string' ? { updatedBy: record.updatedBy } : {})
+    };
+  });
+
+  return {
+    ...(typeof value.exportedAt === 'string' ? { exportedAt: value.exportedAt } : {}),
+    entries
+  };
+}
+
 export function parseLocalDataBackup(
   value: unknown,
   currentSurveyors: Surveyor[],
@@ -172,6 +261,12 @@ export function parseLocalDataBackup(
   )) {
     throw new Error('Danh sách xã trong file sao lưu thiếu mã hoặc tên xã.');
   }
+  const communesByCode = new Map<string, Commune>();
+  communes.forEach(commune => {
+    if (!communesByCode.has(commune.communeCode)) {
+      communesByCode.set(commune.communeCode, commune);
+    }
+  });
 
   const data = isRecord(value.data) ? value.data : {};
   const householdValue = Array.isArray(value.households) ? value.households : data.households;
@@ -295,7 +390,7 @@ export function parseLocalDataBackup(
       ? raw.households.find(isRecord)
       : undefined;
     const communeCode = text(raw.communeCode, text(firstHousehold?.communeCode));
-    const commune = communes.find(item => item.communeCode === communeCode);
+    const commune = communesByCode.get(communeCode);
     const id = text(raw.id, text(raw.areaId));
     const code = text(raw.code, text(raw.areaCode, id.split('-').pop() || ''));
     const name = text(raw.name, text(raw.areaName, text(firstHousehold?.areaName, `Địa bàn ${code}`)));
@@ -311,13 +406,26 @@ export function parseLocalDataBackup(
   if (areas.some(area => !area.id || !area.code || !area.communeId)) {
     throw new Error('Có địa bàn thiếu mã địa bàn hoặc không ghép được với xã trong file sao lưu.');
   }
+  const areasById = new Map<string, SurveyArea>();
+  const areasByCommuneAndCode = new Map<string, SurveyArea>();
+  areas.forEach(area => {
+    if (!areasById.has(area.id)) areasById.set(area.id, area);
+    const key = `${area.communeId}_${area.code}`;
+    if (!areasByCommuneAndCode.has(key)) areasByCommuneAndCode.set(key, area);
+    if (area.communeCode) {
+      const communeCodeKey = `${area.communeCode}_${area.code}`;
+      if (!areasByCommuneAndCode.has(communeCodeKey)) areasByCommuneAndCode.set(communeCodeKey, area);
+    }
+  });
 
   const households = householdsSource.map(({ area, household: raw }) => {
     const areaId = text(raw.areaId, area ? text(area.id, text(area.areaId)) : '');
-    const areaData = areas.find(item => item.id === areaId) ||
-      (area ? areas.find(item => item.id === text(area.id, text(area.areaId))) : undefined);
-    const communeCode = text(raw.communeCode, areaData?.communeCode || '');
-    const commune = communes.find(item => item.communeCode === communeCode);
+    const communeCode = text(raw.communeCode, text(area?.communeCode));
+    const areaData = areasById.get(areaId) ||
+      (area ? areasById.get(text(area.id, text(area.areaId))) : undefined) ||
+      areasByCommuneAndCode.get(`${communeCode}_${text(raw.areaCode, text(area?.code, text(area?.areaCode)))}`);
+    const resolvedCommuneCode = text(communeCode, areaData?.communeCode || '');
+    const commune = communesByCode.get(resolvedCommuneCode);
     const sectorCodeValue = number(raw.sectorCode, 1);
     const sectorCode = ([1, 2, 3, 4].includes(sectorCodeValue) ? sectorCodeValue : 1) as Household['sectorCode'];
     const assignedSurveyorId = text(raw.assignedSurveyorId, area ? text(area.ownerId) : '');
@@ -328,7 +436,7 @@ export function parseLocalDataBackup(
       communeId: text(raw.communeId, areaData?.communeId || commune?.id || ''),
       tkcsCode: text(raw.tkcsCode, commune?.tkcsCode || ''),
       tkcsName: text(raw.tkcsName, commune?.tkcsName || ''),
-      communeCode,
+      communeCode: resolvedCommuneCode,
       communeName: text(raw.communeName, commune?.communeName || ''),
       areaId: areaData?.id || areaId,
       areaCode: text(raw.areaCode, areaData?.code || ''),
