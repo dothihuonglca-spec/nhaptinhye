@@ -459,41 +459,46 @@ export default function App() {
   }, [localDataReady, communes, areas, households, surveyors, departments]);
 
   useEffect(() => {
-    const repairedHouseholds = households.map(household => ({ ...household }));
-    const householdsByArea = new Map<string, Household[]>();
-    repairedHouseholds.forEach(household => {
+    const areaCounts = new Map<string, { official: number; reserve: number }>();
+    households.forEach(household => {
       const areaId = household.areaId || 'UNKNOWN';
-      const group = householdsByArea.get(areaId) || [];
-      group.push(household);
-      householdsByArea.set(areaId, group);
+      const counts = areaCounts.get(areaId) || { official: 0, reserve: 0 };
+      if (household.sampleStatus === 'CHÍNH THỨC' || !household.sampleStatus) counts.official++;
+      if ((household.sampleStatus || '').toUpperCase().includes('DỰ PHÒNG')) counts.reserve++;
+      areaCounts.set(areaId, counts);
     });
 
+    const areasNeedingRepair = new Set(
+      Array.from(areaCounts.entries())
+        .filter(([, counts]) => counts.official < 10 && counts.reserve > 4)
+        .map(([areaId]) => areaId)
+    );
+    if (areasNeedingRepair.size === 0) return;
+
+    const areaIndexes = new Map<string, number>();
     let hasRepair = false;
-    householdsByArea.forEach(areaHouseholds => {
-      const officialCount = areaHouseholds.filter(h =>
-        h.sampleStatus === 'CHÍNH THỨC' || !h.sampleStatus
-      ).length;
-      const reserveCount = areaHouseholds.filter(h =>
-        (h.sampleStatus || '').toUpperCase().includes('DỰ PHÒNG')
-      ).length;
-      if (officialCount < 10 && reserveCount > 4) {
-        areaHouseholds.forEach((household, index) => {
-          const sampleNumber = Number(household.sttMau) || index + 1;
-          const address = (household.address || '').toUpperCase();
-          const isUrbanNeighborhood = address.includes('TDP') || address.includes('TỔ DÂN PHỐ');
-          if (sampleNumber <= 10 && isUrbanNeighborhood &&
-            (household.sampleStatus || '').toUpperCase().includes('DỰ PHÒNG')) {
-            household.sampleStatus = 'CHÍNH THỨC';
-            hasRepair = true;
-          }
-        });
+    const repairedHouseholds = households.map(household => {
+      const areaId = household.areaId || 'UNKNOWN';
+      const index = areaIndexes.get(areaId) || 0;
+      areaIndexes.set(areaId, index + 1);
+      if (!areasNeedingRepair.has(areaId)) return household;
+
+      const sampleNumber = Number(household.sttMau) || index + 1;
+      const address = (household.address || '').toUpperCase();
+      const isUrbanNeighborhood = address.includes('TDP') || address.includes('TỔ DÂN PHỐ');
+      if (sampleNumber <= 10 && isUrbanNeighborhood &&
+        (household.sampleStatus || '').toUpperCase().includes('DỰ PHÒNG')) {
+        hasRepair = true;
+        return { ...household, sampleStatus: 'CHÍNH THỨC' };
       }
+      return household;
     });
 
     if (hasRepair) setHouseholds(repairedHouseholds);
   }, [households]);
 
   useEffect(() => {
+    if (!isLoggedIn || activeTab !== 'surveyor_progress') return;
     const unsubscribe = onSnapshot(collection(db, 'areaProgress'), snapshot => {
       const progress = snapshot.docs.map(document => document.data() as AreaProgressSnapshot)
         .filter(item =>
@@ -512,7 +517,7 @@ export default function App() {
       });
     });
     return () => unsubscribe();
-  }, []);
+  }, [activeTab, isLoggedIn]);
 
   const currentUser: Surveyor = useMemo(() => {
     const found = surveyors.find(s => s.id === currentSurveyorId);
@@ -773,6 +778,35 @@ export default function App() {
     });
     return map;
   }, [surveyors]);
+
+  const surveyorAreaAccessKeys = useMemo(() => {
+    const assignedAreas = currentUser.assignedAreas || [];
+    const keys = new Set(assignedAreas);
+    if (currentUser.role !== 'SURVEYOR' || keys.has('ALL')) return keys;
+    areas.forEach(area => {
+      if (isAreaAssigned(area, assignedAreas)) {
+        keys.add(area.id);
+        keys.add(area.code);
+        keys.add(`${area.communeId}_${area.code}`);
+        if (area.communeCode) keys.add(`${area.communeCode}_${area.code}`);
+      }
+    });
+    return keys;
+  }, [areas, currentUser]);
+
+  const isHouseholdInSurveyorArea = (household: Household) =>
+    surveyorAreaAccessKeys.has('ALL') ||
+    surveyorAreaAccessKeys.has(household.areaId) ||
+    surveyorAreaAccessKeys.has(household.areaCode) ||
+    surveyorAreaAccessKeys.has(`${household.communeId}_${household.areaCode}`) ||
+    surveyorAreaAccessKeys.has(`${household.communeCode}_${household.areaCode}`);
+
+  const myAssignedHouseholdCount = useMemo(() => {
+    if (currentUser.role !== 'SURVEYOR') return 0;
+    return households.filter(household =>
+      household.assignedSurveyorId === currentUser.id || isHouseholdInSurveyorArea(household)
+    ).length;
+  }, [currentUser, households, surveyorAreaAccessKeys]);
 
   // Bộ lọc thông minh được phân quyền theo vai trò (Chỉ hiện địa bàn/xã mà tài khoản phụ trách)
   const availableFilterCommunes = useMemo(() => {
@@ -2514,15 +2548,8 @@ export default function App() {
         if (currentUser.role === 'SURVEYOR') {
           // Nếu hộ đã được gán cho ĐTV khác -> Không hiển thị (tránh lẫn tên người khác)
           if (h.assignedSurveyorId && h.assignedSurveyorId !== currentUser.id) return false;
-
           const isDirect = h.assignedSurveyorId === currentUser.id;
-          const isAreaMatch = currentUser.assignedAreas.includes('ALL') || 
-            currentUser.assignedAreas.includes(h.areaCode) || 
-            currentUser.assignedAreas.includes(h.areaId) ||
-            currentUser.assignedAreas.some(item => {
-              const ar = areas.find(a => a.id === item || a.code === item || `${a.communeId}_${a.code}` === item);
-              return ar && (ar.id === h.areaId || ar.code === h.areaCode || (ar.communeId === h.communeId && ar.code === h.areaCode));
-            });
+          const isAreaMatch = isHouseholdInSurveyorArea(h);
           if (!isDirect && !isAreaMatch) return false;
         } else if (currentUser.role === 'SUPERVISOR') {
           if (currentUser.assignedCommunes && !currentUser.assignedCommunes.includes('ALL')) {
@@ -2595,14 +2622,7 @@ export default function App() {
 
       // 9. Lọc chỉ hộ tôi phụ trách
       if (onlyMyHouseholds && currentUser) {
-        const isMine = h.assignedSurveyorId === currentUser.id || 
-          currentUser.assignedAreas.includes('ALL') || 
-          currentUser.assignedAreas.includes(h.areaCode) || 
-          currentUser.assignedAreas.includes(h.areaId) ||
-          currentUser.assignedAreas.some(item => {
-            const ar = areas.find(a => a.id === item || a.code === item || `${a.communeId}_${a.code}` === item);
-            return ar && (ar.id === h.areaId || ar.code === h.areaCode || (ar.communeId === h.communeId && ar.code === h.areaCode));
-          });
+        const isMine = h.assignedSurveyorId === currentUser.id || isHouseholdInSurveyorArea(h);
         if (!isMine) return false;
       }
 
@@ -2716,6 +2736,7 @@ export default function App() {
 
   // Danh sách xã thuộc phạm vi Tổng hợp nhanh đang xem
   const tnhScopeCommunes = useMemo(() => {
+    if (activeTab !== 'tnh') return [];
     let result = communes;
     if (tnhScopeMode === 'COMMUNE_QUICK' || tnhScopeMode === 'COMMUNE_SECTOR') {
       if (tnhSelectedCommuneId !== 'ALL') {
@@ -2750,10 +2771,11 @@ export default function App() {
     }
 
     return result;
-  }, [communes, households, tnhScopeMode, tnhSelectedCommuneId, selectedCommuneId, tnhSelectedTkcs, selectedTkcs, currentUser]);
+  }, [activeTab, communes, households, tnhScopeMode, tnhSelectedCommuneId, selectedCommuneId, tnhSelectedTkcs, selectedTkcs, currentUser]);
 
   // Hộ gia đình thuộc phạm vi Tổng hợp nhanh đang xem
   const tnhScopeHouseholds = useMemo(() => {
+    if (activeTab !== 'tnh') return [];
     let list = households;
     if (tnhScopeMode === 'COMMUNE_QUICK' || tnhScopeMode === 'COMMUNE_SECTOR') {
       if (tnhSelectedCommuneId !== 'ALL') {
@@ -2783,23 +2805,15 @@ export default function App() {
           list = list.filter(h => currentUser.assignedCommunes?.includes(h.communeId) || (Boolean(h.communeCode) && currentUser.assignedCommunes?.includes(h.communeCode)));
         }
       } else if (currentUser.role === 'SURVEYOR') {
-        list = list.filter(h => {
-          if (h.assignedSurveyorId && h.assignedSurveyorId !== currentUser.id) return false;
-          const isDirect = h.assignedSurveyorId === currentUser.id;
-          const isAreaMatch = currentUser.assignedAreas.includes('ALL') || 
-            currentUser.assignedAreas.includes(h.areaCode) ||
-            currentUser.assignedAreas.includes(h.areaId) ||
-            currentUser.assignedAreas.some(item => {
-              const ar = areas.find(a => a.id === item || a.code === item || `${a.communeId}_${a.code}` === item);
-              return ar && (ar.id === h.areaId || ar.code === h.areaCode || (ar.communeId === h.communeId && ar.code === h.areaCode));
-            });
-          return isDirect || isAreaMatch;
+        list = list.filter(household => {
+          if (household.assignedSurveyorId && household.assignedSurveyorId !== currentUser.id) return false;
+          return household.assignedSurveyorId === currentUser.id || isHouseholdInSurveyorArea(household);
         });
       }
     }
 
     return list;
-  }, [households, communes, tnhScopeMode, tnhSelectedCommuneId, selectedCommuneId, tnhSelectedTkcs, selectedTkcs, selectedAreaId, currentUser]);
+  }, [activeTab, households, communes, tnhScopeMode, tnhSelectedCommuneId, selectedCommuneId, tnhSelectedTkcs, selectedTkcs, selectedAreaId, currentUser, surveyorAreaAccessKeys]);
 
   // Tính toán Tổng hợp nhanh kết nối chuẩn xác Danh mục Xã / TKCS và Phiếu điều tra thực tế
   const tnhSummary = useMemo(() => {
@@ -2943,6 +2957,7 @@ export default function App() {
 
   // Tổng hợp nhanh số liệu cho từng xã trong danh mục đầy đủ 19 cột để link trực tiếp (Tối ưu O(N) với Map)
   const communesTnhOverview = useMemo(() => {
+    if (activeTab !== 'tnh' && activeTab !== 'database') return [];
     const hhByCommune = new Map<string, Household[]>();
     households.forEach(h => {
       if (h.communeId) {
@@ -3036,9 +3051,10 @@ export default function App() {
         sectors: { s1, s2, s3, s4 }
       };
     });
-  }, [communes, households, areas]);
+  }, [activeTab, communes, households, areas]);
 
   const filteredCommunesTnhOverview = useMemo(() => {
+    if (activeTab !== 'tnh') return [];
     return communesTnhOverview.filter(item => {
       // STRICT ROLE-BASED ACCESS CONTROL
       if (currentUser) {
@@ -3075,89 +3091,7 @@ export default function App() {
       }
       return true;
     });
-  }, [communesTnhOverview, selectedTkcs, selectedCommuneId, searchKeyword, currentUser, households, areas]);
-
-  // Tổng hợp chi tiết theo từng địa bàn và xã mà cán bộ / người nhập tin phụ trách
-  const surveyorAssignedAreasSummary = useMemo(() => {
-    if (!currentUser) return [];
-    const myHHs = households.filter(h => 
-      currentUser.role === 'ADMIN' ? true :
-      (h.assignedSurveyorId === currentUser.id || 
-       currentUser.assignedAreas.includes('ALL') || 
-       currentUser.assignedAreas.includes(h.areaCode) ||
-       currentUser.assignedAreas.includes(h.areaId) ||
-       currentUser.assignedAreas.some(item => {
-         const ar = areas.find(a => a.id === item || a.code === item || `${a.communeId}_${a.code}` === item);
-         return ar && (ar.id === h.areaId || ar.code === h.areaCode || (ar.communeId === h.communeId && ar.code === h.areaCode));
-       }))
-    );
-
-    const map = new Map<string, {
-      key: string;
-      communeId: string;
-      communeCode: string;
-      communeName: string;
-      tkcsCode: string;
-      tkcsName: string;
-      areaId: string;
-      areaCode: string;
-      areaName: string;
-      totalAssigned: number;
-      surveyedCount: number;
-      remainingCount: number;
-      totalMembers: number;
-      totalIncome: number;
-      perCapitaMonth: number;
-      percentDone: number;
-    }>();
-
-    myHHs.forEach(h => {
-      const commCode = h.communeCode || '---';
-      const aCode = h.areaCode || '001';
-      const key = `${commCode}_${aCode}`;
-      const commObj = communes.find(c => c.communeCode === commCode || c.id === h.communeId);
-      const areaObj = areas.find(a => a.id === h.areaId || a.code === aCode);
-
-      if (!map.has(key)) {
-        map.set(key, {
-          key,
-          communeId: h.communeId || commObj?.id || '',
-          communeCode: commCode,
-          communeName: h.communeName || commObj?.communeName || '---',
-          tkcsCode: h.tkcsCode || commObj?.tkcsCode || '---',
-          tkcsName: h.tkcsName || commObj?.tkcsName || '---',
-          areaId: h.areaId || areaObj?.id || '',
-          areaCode: aCode,
-          areaName: h.areaName || areaObj?.name || `Địa bàn ${aCode}`,
-          totalAssigned: 0,
-          surveyedCount: 0,
-          remainingCount: 0,
-          totalMembers: 0,
-          totalIncome: 0,
-          perCapitaMonth: 0,
-          percentDone: 0
-        });
-      }
-
-      const g = map.get(key)!;
-      g.totalAssigned += 1;
-      if (isHouseholdSurveyed(h)) {
-        g.surveyedCount += 1;
-        g.totalMembers += (Number(h.membersCount) || 1);
-        g.totalIncome += calculateHouseholdTotalIncome(h).total;
-      }
-    });
-
-    const res = Array.from(map.values()).map(g => {
-      g.remainingCount = Math.max(0, g.totalAssigned - g.surveyedCount);
-      g.percentDone = g.totalAssigned > 0 ? Math.round((g.surveyedCount / g.totalAssigned) * 100) : 0;
-      g.perCapitaMonth = g.totalMembers > 0 ? Math.round(g.totalIncome / g.totalMembers / 12) : 0;
-      return g;
-    });
-
-    res.sort((a, b) => a.communeCode.localeCompare(b.communeCode) || a.areaCode.localeCompare(b.areaCode));
-    return res;
-  }, [households, communes, areas, currentUser]);
+  }, [activeTab, communesTnhOverview, selectedTkcs, selectedCommuneId, searchKeyword, currentUser, areas]);
 
   const handleSaveQuestionnaire = async (updatedHousehold: any) => {
     if (!updatedHousehold) return;
@@ -6257,10 +6191,7 @@ export default function App() {
                   >
                     <span>📌 Chỉ hộ tôi phụ trách</span>
                     <span className={`px-1.5 py-0.2 rounded text-[10px] ${onlyMyHouseholds ? 'bg-sky-900 text-sky-100' : 'bg-slate-200 text-slate-700'}`}>
-                      {households.filter(h => h.assignedSurveyorId === currentUser.id || currentUser.assignedAreas.includes('ALL') || currentUser.assignedAreas.includes(h.areaCode) || currentUser.assignedAreas.includes(h.areaId) || currentUser.assignedAreas.some(item => {
-                        const ar = areas.find(a => a.id === item || a.code === item || `${a.communeId}_${a.code}` === item);
-                        return ar && (ar.id === h.areaId || ar.code === h.areaCode || (ar.communeId === h.communeId && ar.code === h.areaCode));
-                      })).length}
+                      {myAssignedHouseholdCount}
                     </span>
                   </button>
                 )}
