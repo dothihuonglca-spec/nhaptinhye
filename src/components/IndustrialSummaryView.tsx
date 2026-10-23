@@ -159,7 +159,7 @@ export default function IndustrialSummaryView({
     handleValueChange('03', 'prevYearValue', aggregatedIndustryC.prev);
   };
 
-  // Lưu biểu tổng hợp lên Firebase
+  // Lưu biểu tổng hợp trên thiết bị hiện tại
   const handleSave = () => {
     const toSave: IndustrialSummaryReport = {
       ...report,
@@ -315,7 +315,7 @@ export default function IndustrialSummaryView({
               className="px-5 py-2 bg-blue-600 hover:bg-blue-500 rounded-xl text-xs font-black text-white flex items-center gap-1.5 transition-colors cursor-pointer shadow-md"
             >
               <Save className="w-4 h-4" />
-              <span>Lưu Firebase</span>
+              <span>Lưu cục bộ</span>
             </button>
           </div>
         </div>

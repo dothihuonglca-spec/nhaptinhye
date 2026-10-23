@@ -418,7 +418,7 @@ export default function ExcelHeaderConfigModal({
     return samples;
   }, [sheetRawRows, mapping, importMode, selectedSheet]);
 
-  // Execute import and save permanently to Firebase and Commune Catalog
+  // Execute import and save the data to local storage via the parent callbacks.
   const handleSaveAndSync = async (forceOverwrite = false) => {
     if (!workbook || !file) return;
 
@@ -738,7 +738,7 @@ export default function ExcelHeaderConfigModal({
                   Cấu hình Tiêu đề Dòng và Cột nạp dữ liệu Excel
                 </span>
                 <span className="px-2 py-0.5 bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 rounded text-[10px] font-bold">
-                  Đồng bộ Firebase
+                  Lưu cục bộ
                 </span>
               </div>
               <p className="text-[11px] text-sky-200 mt-0.5">
@@ -1345,7 +1345,7 @@ export default function ExcelHeaderConfigModal({
           <div className="text-slate-600 text-[11px] flex items-center gap-1.5">
             <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
             <span>
-              Dữ liệu sẽ được lưu cố định vào <strong>Danh mục xã</strong> và đồng bộ tức thời lên <strong>Firebase Cloud Firestore</strong>.
+              Dữ liệu sẽ được lưu vào danh mục xã, bảng kê và phiếu trên máy này.
             </span>
           </div>
 
@@ -1367,12 +1367,12 @@ export default function ExcelHeaderConfigModal({
               {isProcessing ? (
                 <>
                   <RefreshCw className="w-4 h-4 animate-spin" />
-                  <span>Đang xử lý & Đồng bộ Firebase...</span>
+                  <span>Đang xử lý và lưu cục bộ...</span>
                 </>
               ) : (
                 <>
                   <Check className="w-4 h-4" />
-                  <span>Lưu cố định vào Danh mục xã & Đồng bộ Firebase</span>
+                  <span>Lưu vào danh mục xã trên máy này</span>
                 </>
               )}
             </button>
@@ -1409,7 +1409,7 @@ export default function ExcelHeaderConfigModal({
                   Bạn có muốn GHI ĐÈ vào xã này không?
                 </p>
                 <p className="text-[11px] text-amber-800 mt-1">
-                  - <strong>Ghi đè</strong>: Xóa toàn bộ dữ liệu hộ và địa bàn cũ của xã này, thay thế bằng dữ liệu mới và cập nhật Firebase.<br />
+                  - <strong>Ghi đè</strong>: Xóa dữ liệu hộ và địa bàn cũ của xã này trên máy, thay thế bằng dữ liệu mới.<br />
                   - <strong>Hủy bỏ</strong>: Giữ nguyên dữ liệu hiện tại, không làm trùng xã.
                 </p>
               </div>

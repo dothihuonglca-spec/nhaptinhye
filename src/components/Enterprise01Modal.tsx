@@ -1337,7 +1337,7 @@ export default function Enterprise01Modal({
                   className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 cursor-pointer shadow-md hover:shadow-lg transition-all"
                 >
                   <CheckCircle2 className="w-4 h-4" />
-                  <span>Hoàn thành & Lưu Firebase</span>
+                  <span>Hoàn thành & Lưu trên máy</span>
                 </button>
               </>
             )}

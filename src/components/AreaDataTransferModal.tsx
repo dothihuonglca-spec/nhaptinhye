@@ -9,12 +9,13 @@ import {
   Send, Database, ArrowRight, UserCheck, MapPin, RefreshCw, Layers
 } from 'lucide-react';
 import { Household, SurveyArea, Commune } from '../types';
-import { Surveyor } from '../types/user';
+import { Department, Surveyor } from '../types/user';
 import { 
-  exportSingleAreaJson, 
-  mergeImportedAreaData, 
-  getAreaFileName,
-  isHouseholdModified 
+  createAreaJson,
+  createSurveyWorkPackage,
+  parseSurveyWorkPackage,
+  isAreaAssigned,
+  SurveyWorkPackage
 } from '../utils/areaDataTransfer';
 
 interface AreaDataTransferModalProps {
@@ -22,10 +23,16 @@ interface AreaDataTransferModalProps {
   onClose: () => void;
   currentUser: Surveyor;
   surveyors: Surveyor[];
+  departments: Department[];
   communes: Commune[];
   areas: SurveyArea[];
   households: Household[];
-  onUpdateHouseholds: (updated: Household[]) => void;
+  onApplyWorkPackage: (workPackage: SurveyWorkPackage) => Promise<{
+    updatedCount: number;
+    newCount: number;
+    areaCount: number;
+    progressSynced: boolean;
+  }>;
   showNotification: (type: 'success' | 'error', msg: string) => void;
   initialMode?: 'export' | 'import';
 }
@@ -35,33 +42,33 @@ export default function AreaDataTransferModal({
   onClose,
   currentUser,
   surveyors,
+  departments,
   communes,
   areas,
   households,
-  onUpdateHouseholds,
+  onApplyWorkPackage,
   showNotification,
   initialMode = 'export'
 }: AreaDataTransferModalProps) {
-  const isAdmin = currentUser.role === 'ADMIN' || currentUser.role === 'SUPERVISOR';
+  const canManageData = currentUser.role !== 'SURVEYOR';
+  const canSelectSurveyors = currentUser.role !== 'SURVEYOR';
   const [activeTab, setActiveTab] = useState<'export' | 'import'>(initialMode);
   
   // Export State
   const [selectedSurveyorId, setSelectedSurveyorId] = useState<string>(
-    isAdmin ? (surveyors.find(s => s.role === 'SURVEYOR')?.id || '') : currentUser.id
+    canSelectSurveyors ? '' : currentUser.id
   );
   const [selectedCommuneId, setSelectedCommuneId] = useState<string>('ALL');
   const [selectedAreaId, setSelectedAreaId] = useState<string>('ALL');
-  const [modifiedOnly, setModifiedOnly] = useState<boolean>(!isAdmin); // ĐTV mặc định chỉ xuất hộ mới làm/mới sửa
   const [isExporting, setIsExporting] = useState(false);
 
   // Import State
   const [importedFiles, setImportedFiles] = useState<{ file: File; text: string }[]>([]);
   const [importResults, setImportResults] = useState<{
     fileName: string;
-    areaId: string;
-    areaName: string;
     updatedCount: number;
     newCount: number;
+    areaCount: number;
     success: boolean;
     message: string;
   }[]>([]);
@@ -69,72 +76,167 @@ export default function AreaDataTransferModal({
 
   if (!isOpen) return null;
 
-  // Lọc các địa bàn khả dụng để xuất
-  const availableAreas = areas.filter(a => {
-    // Nếu là ĐTV: chỉ xuất địa bàn mình được phân công
-    if (!isAdmin) {
-      const assignedList = currentUser.assignedAreas || [];
-      const isAssigned = assignedList.includes(a.id) || 
-        assignedList.includes(a.code) || 
-        assignedList.includes(`${a.communeId}_${a.code}`);
-      if (!isAssigned) return false;
-    } else if (selectedSurveyorId) {
-      const targetSurv = surveyors.find(s => s.id === selectedSurveyorId);
-      if (targetSurv) {
-        const assignedList = targetSurv.assignedAreas || [];
-        const isAssigned = assignedList.includes(a.id) || 
-          assignedList.includes(a.code) || 
-          assignedList.includes(`${a.communeId}_${a.code}`);
-        if (!isAssigned) return false;
-      }
-    }
+  const getAreasForSurveyor = (surveyor: Surveyor): SurveyArea[] => {
+    const directAssignedAreaIds = new Set(
+      households
+        .filter(h => h.assignedSurveyorId === surveyor.id)
+        .flatMap(h => areas
+          .filter(area =>
+            area.id === h.areaId ||
+            (area.code === h.areaCode && (
+              area.communeId === h.communeId ||
+              area.communeCode === h.communeCode
+            ))
+          )
+          .map(area => area.id)
+        )
+    );
+    return areas.filter(area =>
+      isAreaAssigned(area, surveyor.assignedAreas || []) ||
+      directAssignedAreaIds.has(area.id)
+    );
+  };
 
-    if (selectedCommuneId !== 'ALL' && a.communeId !== selectedCommuneId) {
-      const c = communes.find(cm => cm.id === selectedCommuneId);
-      if (!c || (a as any).communeCode !== c.communeCode) return false;
-    }
+  const supervisorDepartment = departments.find(d =>
+    d.id === currentUser.departmentId || d.name === currentUser.department
+  );
+  const supervisorAreaKeys = currentUser.assignedAreas || [];
+  const departmentAreaKeys = supervisorDepartment?.assignedAreaCodes || [];
+  const supervisorCommuneKeys = currentUser.assignedCommunes || [];
+  const hasSupervisorAreaScope = supervisorAreaKeys.length > 0 && !supervisorAreaKeys.includes('ALL');
+  const hasDepartmentAreaScope = departmentAreaKeys.length > 0 && !departmentAreaKeys.includes('ALL');
+  const hasSupervisorCommuneScope = supervisorCommuneKeys.length > 0 && !supervisorCommuneKeys.includes('ALL');
+  const hasSupervisorScope = hasSupervisorAreaScope || hasDepartmentAreaScope || hasSupervisorCommuneScope;
 
-    return true;
+  const supervisorAllowedAreas = currentUser.role !== 'SUPERVISOR' || !hasSupervisorScope
+    ? areas
+    : areas.filter(area => {
+      const areaCommune = communes.find(c =>
+        c.id === area.communeId || c.communeCode === area.communeCode
+      );
+      const matchesCommune = hasSupervisorCommuneScope && (
+        supervisorCommuneKeys.includes(area.communeId) ||
+        Boolean(area.communeCode && supervisorCommuneKeys.includes(area.communeCode)) ||
+        Boolean(areaCommune && supervisorCommuneKeys.includes(areaCommune.id))
+      );
+      return matchesCommune ||
+        (hasSupervisorAreaScope && isAreaAssigned(area, supervisorAreaKeys)) ||
+        (hasDepartmentAreaScope && isAreaAssigned(area, departmentAreaKeys));
+    });
+
+  const permittedAreas = currentUser.role === 'SUPERVISOR'
+    ? supervisorAllowedAreas
+    : currentUser.role === 'MANAGER'
+      ? areas.filter(area => isAreaAssigned(area, currentUser.assignedAreas || []))
+      : areas;
+  const eligibleSurveyors = currentUser.role === 'SURVEYOR'
+    ? [currentUser]
+    : surveyors.filter(s =>
+      s.role === 'SURVEYOR' &&
+      getAreasForSurveyor(s).some(area =>
+        permittedAreas.some(allowed => allowed.id === area.id)
+      )
+    );
+  const selectedSurveyors = !canSelectSurveyors
+    ? [currentUser]
+    : selectedSurveyorId
+      ? eligibleSurveyors.filter(s => s.id === selectedSurveyorId)
+      : eligibleSurveyors;
+
+  const targetAreas = currentUser.role === 'ADMIN'
+    ? (selectedSurveyorId
+      ? selectedSurveyors.flatMap(getAreasForSurveyor)
+      : areas)
+    : canSelectSurveyors
+      ? selectedSurveyors.flatMap(getAreasForSurveyor)
+      : getAreasForSurveyor(currentUser);
+
+  const communeFilteredAreas = targetAreas.filter(area => {
+    if (selectedCommuneId === 'ALL') return true;
+    const selectedCommune = communes.find(c =>
+      c.id === selectedCommuneId || c.communeCode === selectedCommuneId
+    );
+    return area.communeId === selectedCommuneId ||
+      Boolean(selectedCommune && area.communeCode === selectedCommune.communeCode);
   });
+  const availableAreas = Array.from(
+    new Map(communeFilteredAreas.map(area => [area.id, area])).values()
+  ).filter(area =>
+    permittedAreas.some(allowed => allowed.id === area.id)
+  );
 
-  // Thực hiện xuất file
-  const handleExecuteExport = () => {
-    if (availableAreas.length === 0) {
-      showNotification('error', 'Không tìm thấy địa bàn nào phù hợp để xuất.');
-      return;
-    }
-
-    const areasToExport = selectedAreaId === 'ALL'
+  const handleExecuteExport = async () => {
+    const selectedAreaList = selectedAreaId === 'ALL'
       ? availableAreas
-      : availableAreas.filter(a => a.id === selectedAreaId || a.code === selectedAreaId);
-
-    if (areasToExport.length === 0) {
-      showNotification('error', 'Vui lòng chọn địa bàn cần xuất.');
+      : availableAreas.filter(a => a.id === selectedAreaId);
+    if (selectedAreaList.length === 0 || selectedSurveyors.length === 0) {
+      showNotification('error', 'Không tìm thấy ĐTV hoặc địa bàn được phân quyền để xuất.');
       return;
     }
 
     setIsExporting(true);
-    let totalExportedHhs = 0;
     try {
-      areasToExport.forEach(area => {
-        const res = exportSingleAreaJson(
-          area,
-          households,
-          communes,
-          currentUser,
-          modifiedOnly
-        );
-        totalExportedHhs += res.count;
-      });
-
-      const scopeText = modifiedOnly ? 'dữ liệu mới làm/mới sửa' : 'toàn bộ bảng kê';
-      showNotification(
-        'success',
-        `Đã xuất thành công ${areasToExport.length} file địa bàn (${totalExportedHhs} hộ, ${scopeText}) theo định dạng chuẩn [MãXã]_[MãĐB].json!`
+      const entries = selectedSurveyors.flatMap(surveyor =>
+        getAreasForSurveyor(surveyor)
+          .filter(area =>
+            selectedAreaList.some(selected => selected.id === area.id) &&
+            permittedAreas.some(allowed => allowed.id === area.id)
+          )
+          .map(area => {
+            const commune = communes.find(c =>
+              c.id === area.communeId || c.communeCode === area.communeCode
+            );
+            if (!commune) {
+              throw new Error(`Không tìm thấy thông tin xã của địa bàn ${area.code} (${area.name}).`);
+            }
+            const areaJson = createAreaJson(
+              area,
+              households,
+              communes,
+              currentUser,
+              false,
+              surveyor
+            );
+            const payload = JSON.parse(areaJson.content) as { households: Household[] };
+            return {
+              surveyorId: surveyor.id,
+              surveyorName: surveyor.name,
+              area,
+              commune,
+              households: payload.households
+            };
+          })
       );
+      if (entries.length === 0) {
+        showNotification('error', 'Không có địa bàn nào trong phạm vi phân quyền để xuất.');
+        return;
+      }
+
+      const assignedSurveyors = selectedSurveyors.filter(surveyor =>
+        entries.some(entry => entry.surveyorId === surveyor.id)
+      );
+      const workPackage = createSurveyWorkPackage(
+        currentUser.role === 'SURVEYOR' ? 'RESULTS' : 'ASSIGNMENT',
+        currentUser,
+        entries,
+        assignedSurveyors
+      );
+      const blob = new Blob([JSON.stringify(workPackage, null, 2)], {
+        type: 'application/json;charset=utf-8'
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `${currentUser.role === 'SURVEYOR' ? 'Ket_Qua_DTV' : 'Phan_Cong_DTV'}_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      const householdCount = entries.reduce((total, entry) => total + entry.households.length, 0);
+      showNotification('success', `Đã xuất 1 file JSON gồm ${entries.length} địa bàn và ${householdCount} hộ.`);
       onClose();
-    } catch (err: any) {
-      showNotification('error', 'Lỗi khi xuất file: ' + err.message);
+    } catch (err) {
+      showNotification('error', `Lỗi khi xuất file JSON: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setIsExporting(false);
     }
@@ -160,51 +262,58 @@ export default function AreaDataTransferModal({
   };
 
   // Thực hiện tổng hợp / nạp các file JSON
-  const handleExecuteImport = () => {
+  const handleExecuteImport = async () => {
     if (importedFiles.length === 0) {
       showNotification('error', 'Vui lòng chọn ít nhất 1 file JSON để nạp.');
       return;
     }
 
     setIsProcessingImport(true);
-    let currentHhs = [...households];
     const results: typeof importResults = [];
 
-    importedFiles.forEach(({ file, text }) => {
-      const res = mergeImportedAreaData(text, currentHhs);
-      if (res.success) {
-        currentHhs = res.mergedHouseholds;
+    try {
+      for (const { file, text } of importedFiles) {
+        const workPackage = parseSurveyWorkPackage(text);
+        const expectedPurpose = currentUser.role === 'SURVEYOR' ? 'ASSIGNMENT' : 'RESULTS';
+        if (workPackage.purpose !== expectedPurpose) {
+          throw new Error(
+            currentUser.role === 'SURVEYOR'
+              ? 'Điều tra viên chỉ nhập được gói phân công do Admin xuất.'
+              : 'Tài khoản quản lý chỉ nhập được gói kết quả do ĐTV xuất.'
+          );
+        }
+        const counts = await onApplyWorkPackage(workPackage);
         results.push({
           fileName: file.name,
-          areaId: res.areaId,
-          areaName: res.areaName,
-          updatedCount: res.updatedCount,
-          newCount: res.newCount,
-          success: true,
-          message: res.message
-        });
-      } else {
-        results.push({
-          fileName: file.name,
-          areaId: '',
-          areaName: '',
-          updatedCount: 0,
-          newCount: 0,
-          success: false,
-          message: res.message
+          updatedCount: counts.updatedCount,
+          newCount: counts.newCount,
+          areaCount: counts.areaCount,
+          success: counts.progressSynced,
+          message: `Đã cập nhật ${counts.updatedCount} hộ, thêm ${counts.newCount} hộ từ ${counts.areaCount} địa bàn.` +
+            (counts.progressSynced ? '' : ' Dữ liệu đã lưu cục bộ nhưng chưa đồng bộ số đếm tiến độ lên Firebase.')
         });
       }
-    });
-
-    setImportResults(results);
-    onUpdateHouseholds(currentHhs);
-    setIsProcessingImport(false);
-
-    const successCount = results.filter(r => r.success).length;
-    if (successCount > 0) {
-      showNotification('success', `Đã tổng hợp thành công ${successCount}/${importedFiles.length} file địa bàn vào bộ nhớ máy!`);
-    } else {
-      showNotification('error', 'Không thể nạp dữ liệu từ các file đã chọn.');
+      setImportResults(results);
+      const failedProgressSync = results.some(result => !result.success);
+      showNotification(
+        failedProgressSync ? 'error' : 'success',
+        failedProgressSync
+          ? `Đã lưu gói JSON trên máy này; không đồng bộ được tiến độ Firebase cho ${results.filter(result => !result.success).length} gói.`
+          : `Đã nhập thành công ${results.length} gói JSON trên máy này.`
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setImportResults([{
+        fileName: importedFiles[0]?.file.name || 'Gói JSON',
+        updatedCount: 0,
+        newCount: 0,
+        areaCount: 0,
+        success: false,
+        message
+      }]);
+      showNotification('error', `Không thể nhập gói JSON: ${message}`);
+    } finally {
+      setIsProcessingImport(false);
     }
   };
 
@@ -220,12 +329,12 @@ export default function AreaDataTransferModal({
             </div>
             <div>
               <h3 className="font-extrabold text-sm tracking-wide">
-                {isAdmin ? 'TRAO ĐỔI & TỔNG HỢP DỮ LIỆU ĐỊA BÀN (JSON)' : 'QUẢN LÝ DỮ LIỆU ĐỊA BÀN - ĐIỀU TRA VIÊN'}
+                {canManageData ? 'GIAO NHẬN DỮ LIỆU ĐỊA BÀN (JSON)' : 'DỮ LIỆU ĐỊA BÀN - ĐIỀU TRA VIÊN'}
               </h3>
               <p className="text-[11px] text-sky-200">
-                {isAdmin 
-                  ? 'Xuất dữ liệu bảng kê cho từng ĐTV hoặc nạp file JSON từ ĐTV gửi về để tổng hợp'
-                  : 'Nạp file địa bàn từ Admin để làm việc hoặc xuất dữ liệu mới hoàn thành để gửi Admin'
+                {canManageData
+                  ? 'Xuất gói phân công cho ĐTV hoặc nhập gói kết quả ĐTV gửi về'
+                  : 'Nhập gói phân công từ Admin hoặc xuất kết quả gửi Admin'
                 }
               </p>
             </div>
@@ -251,7 +360,7 @@ export default function AreaDataTransferModal({
             }`}
           >
             <Download className="w-4 h-4 text-sky-700" />
-            <span>{isAdmin ? '1. Xuất Data Bảng Kê Cho ĐTV' : '1. Xuất Data Mới Làm Gửi Admin'}</span>
+            <span>{canManageData ? '1. Xuất gói phân công' : '1. Xuất kết quả gửi Admin'}</span>
           </button>
           <button
             type="button"
@@ -263,7 +372,7 @@ export default function AreaDataTransferModal({
             }`}
           >
             <Upload className="w-4 h-4 text-emerald-700" />
-            <span>{isAdmin ? '2. Tổng Hợp Data (Từ ĐTV Gửi Về)' : '2. Nhập Data Địa Bàn (Từ Admin Gửi)'}</span>
+            <span>{canManageData ? '2. Nhập kết quả từ ĐTV' : '2. Nhập gói phân công'}</span>
           </button>
         </div>
 
@@ -276,16 +385,15 @@ export default function AreaDataTransferModal({
               <div className="bg-sky-50 border border-sky-200 rounded-lg p-3 text-slate-700">
                 <div className="font-bold text-sky-900 mb-1 flex items-center gap-1.5">
                   <Database className="w-4 h-4 text-sky-700" />
-                  <span>Quy ước đặt tên file ID địa bàn chuẩn:</span>
+                  <span>Một định dạng thống nhất cho giao và nhận dữ liệu:</span>
                 </div>
                 <p className="text-[11px] leading-relaxed text-slate-600">
-                  File xuất ra sẽ tự động đặt tên theo cấu trúc <strong className="text-sky-800">[Mã xã]_[Mã địa bàn].json</strong> (ví dụ: <code className="bg-white px-1.5 py-0.5 rounded border border-sky-300 font-mono text-sky-900">11992_001.json</code>).
-                  Dữ liệu được lưu trữ trực tiếp trên file, giúp thao tác độc lập, mượt mà và không giới hạn lưu lượng mạng.
+                  Hệ thống dùng <strong className="text-sky-800">một file JSON</strong> cho toàn bộ gói phân công hoặc kết quả. Gói phân công có bảng kê và quyền theo từng ĐTV; gói kết quả chỉ cập nhật phiếu của các hộ đã có trong danh sách.
                 </p>
               </div>
 
               {/* Lựa chọn ĐTV (Dành cho Admin) */}
-              {isAdmin && (
+              {canSelectSurveyors && (
                 <div className="flex flex-col gap-1">
                   <label className="font-bold text-slate-700 flex items-center gap-1">
                     <UserCheck className="w-3.5 h-3.5 text-sky-700" />
@@ -293,11 +401,14 @@ export default function AreaDataTransferModal({
                   </label>
                   <select
                     value={selectedSurveyorId}
-                    onChange={e => setSelectedSurveyorId(e.target.value)}
+                    onChange={e => {
+                      setSelectedSurveyorId(e.target.value);
+                      setSelectedAreaId('ALL');
+                    }}
                     className="border border-slate-300 rounded p-2 bg-white font-bold text-slate-800 focus:outline-sky-600"
                   >
                     <option value="">-- Tất cả Điều tra viên --</option>
-                    {surveyors.filter(s => s.role === 'SURVEYOR').map(s => (
+                    {eligibleSurveyors.map(s => (
                       <option key={s.id} value={s.id}>
                         {s.name} ({s.code} - {s.username}) - Phụ trách: {(s.assignedAreas || []).length} địa bàn
                       </option>
@@ -350,41 +461,22 @@ export default function AreaDataTransferModal({
                 </div>
               </div>
 
-              {/* Tùy chọn: Chỉ xuất những dữ liệu mới làm hoặc mới sửa */}
-              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 flex items-start gap-2.5">
-                <input
-                  type="checkbox"
-                  id="chkModifiedOnly"
-                  checked={modifiedOnly}
-                  onChange={e => setModifiedOnly(e.target.checked)}
-                  className="w-4 h-4 mt-0.5 rounded text-sky-600 cursor-pointer"
-                />
-                <label htmlFor="chkModifiedOnly" className="cursor-pointer">
-                  <strong className="text-amber-900 block text-xs">
-                    Chỉ xuất những dữ liệu hộ mới làm hoặc mới sửa
-                  </strong>
-                  <span className="text-[11px] text-amber-800 block mt-0.5">
-                    (Khuyến nghị cho ĐTV: Hệ thống chỉ trích xuất những hộ đã nhập tin, đã có kết quả thu nhập hoặc có sửa đổi để gửi Admin tổng hợp, giúp file gọn nhẹ và tối ưu tốc độ).
-                  </span>
-                </label>
-              </div>
-
               {/* Preview số lượng */}
               <div className="text-[11px] text-slate-500 bg-white p-2.5 rounded border border-slate-200">
-                <span>Số địa bàn sẽ xuất: <strong>{selectedAreaId === 'ALL' ? availableAreas.length : 1}</strong> địa bàn. </span>
-                {modifiedOnly && <span className="text-amber-700 font-bold ml-1">(Chỉ lọc các hộ đã điều tra/chỉnh sửa).</span>}
+                Phạm vi gói: <strong>{selectedSurveyors.length} ĐTV</strong>,{' '}
+                <strong>{selectedAreaId === 'ALL' ? availableAreas.length : 1} địa bàn</strong>.
               </div>
 
               {/* Nút hành động */}
               <button
                 type="button"
                 onClick={handleExecuteExport}
-                disabled={isExporting || availableAreas.length === 0}
+                disabled={isExporting || availableAreas.length === 0 || selectedSurveyors.length === 0}
                 className="w-full py-2.5 bg-sky-700 hover:bg-sky-600 disabled:bg-slate-300 text-white rounded-lg font-extrabold text-xs flex items-center justify-center gap-2 cursor-pointer shadow-xs transition-colors"
               >
                 {isExporting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
                 <span>
-                  {isAdmin ? 'TẢI FILE JSON BẢNG KÊ ĐỊA BÀN ĐỂ GỬI ĐTV' : 'TẢI FILE DATA ĐỊA BÀN HOÀN THÀNH ĐỂ GỬI ADMIN'}
+                  {canManageData ? 'TẢI 1 FILE JSON GÓI PHÂN CÔNG' : 'TẢI 1 FILE JSON KẾT QUẢ CỦA TÔI'}
                 </span>
               </button>
             </div>
@@ -397,13 +489,13 @@ export default function AreaDataTransferModal({
                 <div className="font-bold text-emerald-900 mb-1 flex items-center gap-1.5">
                   <Upload className="w-4 h-4 text-emerald-700" />
                   <span>
-                    {isAdmin ? 'Tổng hợp dữ liệu từ các file do ĐTV gửi về:' : 'Nạp dữ liệu địa bàn do Admin gửi:'}
+                    {canManageData ? 'Nhập gói kết quả JSON do ĐTV gửi:' : 'Nhập gói phân công JSON do Admin gửi:'}
                   </span>
                 </div>
                 <p className="text-[11px] leading-relaxed text-slate-600">
-                  {isAdmin 
-                    ? 'Bạn có thể chọn 1 hoặc nhiều file JSON có tên [MãXã]_[MãĐB].json do các Điều tra viên gửi. Hệ thống sẽ tự động cập nhật kết quả khảo sát của từng hộ vào cơ sở dữ liệu tổng hợp.'
-                    : 'Chọn file JSON do Quản trị viên gửi cho bạn để nạp danh sách hộ và địa bàn vào máy bắt đầu điều tra.'
+                  {canManageData
+                    ? 'Chọn file kết quả do ĐTV xuất. Ứng dụng chỉ cập nhật nội dung phiếu và trạng thái, giữ nguyên bảng kê/phân công gốc trên máy Admin.'
+                    : 'Chọn file phân công từ Admin. Ứng dụng chỉ nạp địa bàn dành cho tài khoản đang đăng nhập và lưu dữ liệu trên máy này.'
                   }
                 </p>
               </div>
@@ -423,7 +515,7 @@ export default function AreaDataTransferModal({
                   <input
                     type="file"
                     accept=".json"
-                    multiple={isAdmin}
+                    multiple={canManageData}
                     onChange={handleFileSelect}
                     className="hidden"
                   />
@@ -479,7 +571,7 @@ export default function AreaDataTransferModal({
               >
                 {isProcessingImport ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Database className="w-4 h-4" />}
                 <span>
-                  {isAdmin ? 'TIẾN HÀNH TỔNG HỢP VÀO CƠ SỞ DỮ LIỆU' : 'NẠP DỮ LIỆU ĐỊA BÀN VÀO MÁY'}
+                  {canManageData ? 'NHẬP KẾT QUẢ VÀO MÁY ADMIN' : 'NẠP GÓI PHÂN CÔNG VÀO MÁY'}
                 </span>
               </button>
             </div>
@@ -490,7 +582,7 @@ export default function AreaDataTransferModal({
         {/* Modal Footer */}
         <div className="p-3 bg-slate-100 border-t border-slate-200 flex items-center justify-between text-xs">
           <span className="text-slate-500">
-            Dữ liệu được lưu trữ trực tiếp trên thiết bị (Local Storage), siêu tốc độ và bảo mật.
+            Bảng kê và phiếu lưu trên máy này; Firebase chỉ nhận các số đếm tiến độ.
           </span>
           <button
             type="button"

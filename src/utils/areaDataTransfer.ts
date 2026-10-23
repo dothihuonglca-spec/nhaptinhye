@@ -26,6 +26,215 @@ export interface AreaJsonPayload {
   households: Household[];
 }
 
+export interface SurveyWorkPackageEntry {
+  surveyorId: string;
+  surveyorName: string;
+  area: SurveyArea;
+  commune: Commune;
+  households: Household[];
+}
+
+export type SurveyorWorkProfile = Pick<
+  Surveyor,
+  | 'id'
+  | 'code'
+  | 'username'
+  | 'name'
+  | 'role'
+  | 'departmentId'
+  | 'department'
+  | 'position'
+  | 'assignedAreas'
+  | 'assignedCommunes'
+  | 'status'
+  | 'mustChangePassword'
+  | 'createdAt'
+  | 'updatedAt'
+>;
+
+export interface SurveyWorkPackage {
+  type: 'SURVEY_WORK_PACKAGE';
+  version: '1.0';
+  purpose: 'ASSIGNMENT' | 'RESULTS';
+  exportedAt: string;
+  exportedBy: {
+    id: string;
+    name: string;
+    role: Surveyor['role'];
+  };
+  surveyors?: SurveyorWorkProfile[];
+  entries: SurveyWorkPackageEntry[];
+}
+
+export interface AreaProgressSnapshot {
+  id: string;
+  surveyorId: string;
+  surveyorName: string;
+  areaId: string;
+  communeId: string;
+  communeCode: string;
+  communeName: string;
+  areaCode: string;
+  areaName: string;
+  totalHouseholds: number;
+  completedHouseholds: number;
+  inProgressHouseholds: number;
+  updatedAt: string;
+}
+
+export function createSurveyWorkPackage(
+  purpose: SurveyWorkPackage['purpose'],
+  currentUser: Surveyor,
+  entries: SurveyWorkPackageEntry[],
+  surveyors: Surveyor[] = []
+): SurveyWorkPackage {
+  return {
+    type: 'SURVEY_WORK_PACKAGE',
+    version: '1.0',
+    purpose,
+    exportedAt: new Date().toISOString(),
+    exportedBy: {
+      id: currentUser.id,
+      name: currentUser.name,
+      role: currentUser.role
+    },
+    surveyors: purpose === 'ASSIGNMENT'
+      ? surveyors.map(surveyor => ({
+        id: surveyor.id,
+        code: surveyor.code,
+        username: surveyor.username,
+        name: surveyor.name,
+        role: surveyor.role,
+        departmentId: surveyor.departmentId,
+        department: surveyor.department,
+        position: surveyor.position,
+        assignedAreas: surveyor.assignedAreas,
+        assignedCommunes: surveyor.assignedCommunes,
+        status: surveyor.status,
+        mustChangePassword: surveyor.mustChangePassword,
+        createdAt: surveyor.createdAt,
+        updatedAt: surveyor.updatedAt
+      }))
+      : undefined,
+    entries
+  };
+}
+
+export function parseSurveyWorkPackage(text: string): SurveyWorkPackage {
+  const data: unknown = JSON.parse(text);
+  if (!data || typeof data !== 'object') {
+    throw new Error('Tệp JSON không chứa gói công việc hợp lệ.');
+  }
+  const workPackage = data as Partial<SurveyWorkPackage>;
+  const exportedBy = workPackage.exportedBy;
+  if (
+    workPackage.type !== 'SURVEY_WORK_PACKAGE' ||
+    workPackage.version !== '1.0' ||
+    !['ASSIGNMENT', 'RESULTS'].includes(workPackage.purpose || '') ||
+    !Array.isArray(workPackage.entries) ||
+    workPackage.entries.length === 0
+  ) {
+    throw new Error('Sai định dạng gói công việc hoặc gói không có địa bàn.');
+  }
+  if (
+    !exportedBy?.id ||
+    !exportedBy.name ||
+    !['ADMIN', 'MANAGER', 'SUPERVISOR', 'SURVEYOR'].includes(exportedBy.role) ||
+    (workPackage.purpose === 'ASSIGNMENT' && exportedBy.role === 'SURVEYOR') ||
+    (workPackage.purpose === 'RESULTS' && exportedBy.role !== 'SURVEYOR')
+  ) {
+    throw new Error('Gói JSON thiếu thông tin hoặc sai vai trò người xuất.');
+  }
+
+  workPackage.entries.forEach(entry => {
+    if (
+      !entry?.surveyorId ||
+      !entry.surveyorName ||
+      !entry.area?.id ||
+      !entry.commune?.id ||
+      !Array.isArray(entry.households) ||
+      entry.households.some(household => !household || typeof household.id !== 'string')
+    ) {
+      throw new Error('Gói JSON có địa bàn thiếu mã phân công hoặc danh sách hộ.');
+    }
+    if (workPackage.purpose === 'RESULTS' && entry.surveyorId !== exportedBy.id) {
+      throw new Error('Gói kết quả có mã ĐTV không khớp với người xuất file.');
+    }
+  });
+  if (workPackage.purpose === 'ASSIGNMENT' && workPackage.surveyors !== undefined) {
+    if (!Array.isArray(workPackage.surveyors) || workPackage.surveyors.some(profile =>
+      !profile?.id ||
+      typeof profile.name !== 'string' ||
+      typeof profile.code !== 'string' ||
+      typeof profile.username !== 'string' ||
+      profile.role !== 'SURVEYOR' ||
+      !['ACTIVE', 'LOCKED', 'INACTIVE'].includes(profile.status) ||
+      !Array.isArray(profile.assignedAreas)
+    )) {
+      throw new Error('Gói phân công có thông tin tài khoản hoặc phân quyền ĐTV không hợp lệ.');
+    }
+  }
+  return workPackage as SurveyWorkPackage;
+}
+
+export function createAreaProgressSnapshot(
+  surveyorId: string,
+  surveyorName: string,
+  area: SurveyArea,
+  commune: Commune,
+  households: Household[]
+): AreaProgressSnapshot {
+  const areaHouseholds = households
+    .filter(h =>
+      h.areaId === area.id ||
+      (h.areaCode === area.code && (
+        h.communeId === area.communeId ||
+        h.communeCode === commune.communeCode
+      ))
+    )
+    .filter(h => (h.sampleStatus || 'CHÍNH THỨC') !== 'DỰ PHÒNG')
+    .slice(0, 10);
+  const completedHouseholds = areaHouseholds.filter(h =>
+    h.surveyStatus === 'DA_HOAN_THANH' || h.surveyStatus === 'DA_DUYET'
+  ).length;
+  const inProgressHouseholds = areaHouseholds.filter(h =>
+    h.surveyStatus === 'DANG_NHAP'
+  ).length;
+
+  return {
+    id: `${encodeURIComponent(surveyorId)}_${encodeURIComponent(area.id)}`,
+    surveyorId,
+    surveyorName,
+    areaId: area.id,
+    communeId: commune.id,
+    communeCode: commune.communeCode,
+    communeName: commune.communeName,
+    areaCode: area.code,
+    areaName: area.name,
+    totalHouseholds: areaHouseholds.length,
+    completedHouseholds,
+    inProgressHouseholds,
+    updatedAt: new Date().toISOString()
+  };
+}
+
+export function isAreaAssigned(
+  area: Pick<SurveyArea, 'id' | 'code' | 'communeCode'> & { communeId?: string },
+  assignedAreas: string[]
+): boolean {
+  if (assignedAreas.includes('ALL')) return true;
+
+  const areaKeys = [
+    area.id,
+    area.code,
+    `${area.communeId}_${area.code}`,
+    area.communeId,
+    area.communeCode
+  ];
+
+  return areaKeys.some(key => key !== undefined && assignedAreas.includes(key));
+}
+
 /**
  * Tạo tên file chuẩn theo ID địa bàn: [Mã_xã]_[Mã_địa_bàn].json
  */
@@ -53,12 +262,13 @@ export function isHouseholdModified(h: Household): boolean {
 /**
  * Xuất file JSON dữ liệu của 1 địa bàn
  */
-export function exportSingleAreaJson(
+export function createAreaJson(
   area: { id: string; code: string; name: string; communeId?: string; communeCode?: string },
   allHouseholds: Household[],
   communes: Commune[],
   currentUser: Surveyor,
-  modifiedOnly = false
+  modifiedOnly = false,
+  assignedSurveyor?: Surveyor
 ): { fileName: string; count: number; content: string } {
   // Tìm thông tin xã
   const comm = communes.find(c => 
@@ -74,9 +284,29 @@ export function exportSingleAreaJson(
   // Lọc các hộ thuộc địa bàn này
   let areaHhs = allHouseholds.filter(h => 
     (h.areaId && h.areaId === area.id) ||
-    (h.areaCode && h.areaCode === area.code && (!h.communeId || !area.communeId || h.communeId === area.communeId)) ||
+    (h.areaCode && h.areaCode === area.code && (
+      !area.communeId ||
+      h.communeId === area.communeId ||
+      h.communeId === communeCode ||
+      h.communeCode === communeCode ||
+      (!h.communeId && !h.communeCode)
+    )) ||
     (h.communeCode && h.communeCode === communeCode && h.areaCode === areaCode)
   );
+
+  if (assignedSurveyor) {
+    const hasAreaAssignment = isAreaAssigned(area, assignedSurveyor.assignedAreas || []);
+    areaHhs = areaHhs.filter(h => {
+      const matchesSurveyor = h.assignedSurveyorId
+        ? h.assignedSurveyorId === assignedSurveyor.id
+        : !h.assignedSurveyorName || h.assignedSurveyorName === assignedSurveyor.name;
+      return hasAreaAssignment
+        ? matchesSurveyor
+        : Boolean(h.assignedSurveyorId === assignedSurveyor.id || (
+          !h.assignedSurveyorId && h.assignedSurveyorName === assignedSurveyor.name
+        ));
+    });
+  }
 
   // Nếu chỉ xuất những dữ liệu mới làm hoặc mới sửa
   if (modifiedOnly) {
@@ -93,8 +323,8 @@ export function exportSingleAreaJson(
     areaName,
     tkcsCode: comm?.tkcsCode || '',
     tkcsName: comm?.tkcsName || '',
-    assignedSurveyorId: currentUser.role === 'SURVEYOR' ? currentUser.id : undefined,
-    assignedSurveyorName: currentUser.role === 'SURVEYOR' ? currentUser.name : undefined,
+    assignedSurveyorId: assignedSurveyor?.id || (currentUser.role === 'SURVEYOR' ? currentUser.id : undefined),
+    assignedSurveyorName: assignedSurveyor?.name || (currentUser.role === 'SURVEYOR' ? currentUser.name : undefined),
     exportedAt: new Date().toISOString(),
     exportedByRole: currentUser.role,
     exportedByName: currentUser.name,
@@ -106,18 +336,41 @@ export function exportSingleAreaJson(
   const fileName = getAreaFileName(communeCode, areaCode);
   const content = JSON.stringify(payload, null, 2);
 
+  return { fileName, count: areaHhs.length, content };
+}
+
+/**
+ * Xuất file JSON dữ liệu của 1 địa bàn
+ */
+export function exportSingleAreaJson(
+  area: { id: string; code: string; name: string; communeId?: string; communeCode?: string },
+  allHouseholds: Household[],
+  communes: Commune[],
+  currentUser: Surveyor,
+  modifiedOnly = false,
+  assignedSurveyor?: Surveyor
+): { fileName: string; count: number; content: string } {
+  const result = createAreaJson(
+    area,
+    allHouseholds,
+    communes,
+    currentUser,
+    modifiedOnly,
+    assignedSurveyor
+  );
+
   // Trigger download
-  const blob = new Blob([content], { type: 'application/json;charset=utf-8;' });
+  const blob = new Blob([result.content], { type: 'application/json;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
-  link.setAttribute('download', fileName);
+  link.setAttribute('download', result.fileName);
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
   URL.revokeObjectURL(url);
 
-  return { fileName, count: areaHhs.length, content };
+  return result;
 }
 
 /**
