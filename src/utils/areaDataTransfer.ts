@@ -250,6 +250,7 @@ export function parseSurveyWorkPackage(text: string): SurveyWorkPackage {
       !entry.area?.id ||
       !entry.commune?.id ||
       !Array.isArray(entry.households) ||
+      entry.households.length === 0 ||
       entry.households.some(household => !household || typeof household.id !== 'string')
     ) {
       throw new Error('Gói JSON có địa bàn thiếu mã phân công hoặc danh sách hộ.');
