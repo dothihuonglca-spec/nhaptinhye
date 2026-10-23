@@ -82,6 +82,16 @@ export interface AreaProgressSnapshot {
   updatedAt: string;
 }
 
+export function normalizeSurveyorName(name: string): string {
+  return name
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[đĐ]/g, character => character === 'đ' ? 'd' : 'D')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLocaleLowerCase('vi');
+}
+
 export function createSurveyWorkPackage(
   purpose: SurveyWorkPackage['purpose'],
   currentUser: Surveyor,
@@ -145,16 +155,22 @@ function parseLegacyAreaResult(data: Record<string, unknown>): SurveyWorkPackage
       throw new Error('File kết quả địa bàn có hộ thiếu mã hộ.');
     }
     const household = value as unknown as Household;
+    const sameSurveyorName = normalizeSurveyorName(household.assignedSurveyorName || '') ===
+      normalizeSurveyorName(surveyorName);
     if (
       !household.areaId ||
       !household.areaCode ||
       !household.communeId ||
       !household.communeCode ||
-      (household.assignedSurveyorId && household.assignedSurveyorId !== surveyorId)
+      (household.assignedSurveyorId && household.assignedSurveyorId !== surveyorId && !sameSurveyorName)
     ) {
       throw new Error('File kết quả địa bàn có hộ sai địa bàn hoặc không khớp ĐTV xuất file.');
     }
-    return household;
+    return {
+      ...household,
+      assignedSurveyorId: surveyorId,
+      assignedSurveyorName: surveyorName
+    };
   });
 
   const firstHousehold = households[0];

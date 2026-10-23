@@ -65,6 +65,12 @@ interface SurveyorManagementProps {
   showNotification: (type: 'success' | 'error', msg: string) => void;
 }
 
+const officialCommuneByIdOrCode = new Map<string, (typeof OFFICIAL_COMMUNES_CATALOG)[number]>();
+OFFICIAL_COMMUNES_CATALOG.forEach(commune => {
+  officialCommuneByIdOrCode.set(commune.id, commune);
+  if (commune.communeCode) officialCommuneByIdOrCode.set(commune.communeCode, commune);
+});
+
 export default function SurveyorManagement({
   surveyors,
   departments,
@@ -147,7 +153,7 @@ export default function SurveyorManagement({
     if (c.tkcsCode && c.tkcsName) {
       return { code: c.tkcsCode, name: c.tkcsName };
     }
-    const found = OFFICIAL_COMMUNES_CATALOG.find(cat => cat.communeCode === c.communeCode || cat.id === c.id);
+    const found = officialCommuneByIdOrCode.get(c.id) || officialCommuneByIdOrCode.get(c.communeCode);
     return {
       code: c.tkcsCode || found?.tkcsCode || 'TK001',
       name: c.tkcsName || found?.tkcsName || 'Tổ TKCS Phố Hiến'
@@ -196,10 +202,20 @@ export default function SurveyorManagement({
 
   // 4. Danh sách Địa bàn: Lọc theo xã thì CHỈ HIỆN ĐỊA BÀN THUỘC ĐÚNG XÃ ĐÓ
   const visibleAreas = useMemo(() => {
+    let assignedAreaKeys: Set<string> | undefined;
+    if (rightOnlyUnassigned) {
+      assignedAreaKeys = new Set(surveyors.flatMap(surveyor => surveyor.assignedAreas || []));
+      households.forEach(household => {
+        if (!household.assignedSurveyorId) return;
+        if (household.areaId) assignedAreaKeys?.add(household.areaId);
+        if (household.areaCode) assignedAreaKeys?.add(household.areaCode);
+      });
+    }
     return allowedSupervisorAreas.filter(a => {
       // 1. Lọc theo TKCS
       if (rightTkcsFilter !== 'ALL') {
-        const comm = communeLookupMap.get(a.communeId) || allowedSupervisorCommunes.find(c => c.communeCode === (a as any).communeCode || c.id === a.communeId);
+        const comm = communeLookupMap.get(a.communeId) ||
+          communeLookupMap.get((a as any).communeCode);
         if (!comm || getCommuneTkcs(comm).code !== rightTkcsFilter) return false;
       }
 
@@ -224,15 +240,30 @@ export default function SurveyorManagement({
 
       // 4. Chỉ hiển thị địa bàn chưa giao
       if (rightOnlyUnassigned) {
-        const isAssigned = surveyors.some(s => 
-          (s.assignedAreas || []).includes(a.id) || (s.assignedAreas || []).includes(a.code)
-        ) || households.some(h => !!h.assignedSurveyorId && (h.areaId === a.id || h.areaCode === a.code));
+        const isAssigned = assignedAreaKeys?.has(a.id) || assignedAreaKeys?.has(a.code);
         if (isAssigned) return false;
       }
 
       return true;
     });
   }, [allowedSupervisorAreas, rightTkcsFilter, rightCommuneFilter, rightAreaSearch, rightOnlyUnassigned, communeLookupMap, allowedSupervisorCommunes, getCommuneTkcs, surveyors, households]);
+
+  const householdAreaKeysBySurveyor = useMemo(() => {
+    const map = new Map<string, Set<string>>();
+    households.forEach(household => {
+      if (!household.assignedSurveyorId) return;
+      const keys = map.get(household.assignedSurveyorId) || new Set<string>();
+      if (household.areaId) keys.add(household.areaId);
+      if (household.communeId && household.areaCode) {
+        keys.add(`${household.communeId}_${household.areaCode}`);
+      }
+      if (household.communeCode && household.areaCode) {
+        keys.add(`${household.communeCode}_${household.areaCode}`);
+      }
+      map.set(household.assignedSurveyorId, keys);
+    });
+    return map;
+  }, [households]);
 
   // 5. Thống kê số hộ mẫu theo địa bàn
   const areaStatsMap = useMemo(() => {
@@ -290,6 +321,7 @@ export default function SurveyorManagement({
   const handleSelectPerson = useCallback((s: Surveyor) => {
     setSelectedPersonId(s.id);
     const sAssignedSet = new Set((s.assignedAreas || []).filter(item => item !== '001' && item !== 'ALL'));
+    const householdAssignedSet = householdAreaKeysBySurveyor.get(s.id) || new Set<string>();
     const initialChecked = new Set<string>();
 
     allowedSupervisorAreas.forEach(a => {
@@ -298,12 +330,9 @@ export default function SurveyorManagement({
         sAssignedSet.has(`${a.communeId}_${a.code}`) ||
         (Boolean((a as any).communeCode) && sAssignedSet.has(`${(a as any).communeCode}_${a.code}`));
 
-      const hasAssignedHouseholds = households.some(h => 
-        h.assignedSurveyorId === s.id && (
-          h.areaId === a.id || 
-          (h.areaCode === a.code && (h.communeId === a.communeId || (h as any).communeCode === (a as any).communeCode || h.communeId === (a as any).communeCode))
-        )
-      );
+      const hasAssignedHouseholds = householdAssignedSet.has(a.id) ||
+        householdAssignedSet.has(`${a.communeId}_${a.code}`) ||
+        (Boolean((a as any).communeCode) && householdAssignedSet.has(`${(a as any).communeCode}_${a.code}`));
 
       if (isDirectlyAssigned || hasAssignedHouseholds) {
         initialChecked.add(a.id);
@@ -311,7 +340,7 @@ export default function SurveyorManagement({
     });
 
     setCheckedAreaIds(initialChecked);
-  }, [allowedSupervisorAreas, households]);
+  }, [allowedSupervisorAreas, householdAreaKeysBySurveyor]);
 
   // Tự động chọn người đầu tiên nếu chưa chọn ai
   useEffect(() => {
