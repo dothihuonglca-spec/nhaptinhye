@@ -86,13 +86,26 @@ function number(value: unknown, fallback = 0): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function recordsFrom(value: unknown): Record<string, unknown>[] | null {
+  const records = Array.isArray(value)
+    ? value
+    : isRecord(value)
+      ? Object.values(value)
+      : null;
+  if (!records || records.some(record => !isRecord(record))) return null;
+  return records as Record<string, unknown>[];
+}
+
 export function parseLocalDataBackup(
   value: unknown,
   currentSurveyors: Surveyor[],
   currentDepartments: Department[]
 ): LocalDataSnapshot {
-  if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.communes) || !Array.isArray(value.areas)) {
-    throw new Error('File không đúng định dạng bản sao lưu cục bộ (cần version 1, communes và areas).');
+  if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.communes)) {
+    const availableKeys = isRecord(value) ? Object.keys(value).join(', ') : 'không có object JSON ở cấp ngoài';
+    throw new Error(
+      `Không nhận diện được bản sao lưu cục bộ: cần version 1 và communes là mảng. Các trường cấp ngoài tìm thấy: ${availableKeys || 'không có'}.`
+    );
   }
 
   const communes = value.communes.filter(isRecord).map(raw => ({
@@ -109,9 +122,61 @@ export function parseLocalDataBackup(
     throw new Error('Danh sách xã trong file sao lưu thiếu mã hoặc tên xã.');
   }
 
-  const areaRecords = value.areas.filter(isRecord);
-  if (areaRecords.length !== value.areas.length) {
-    throw new Error('Danh sách địa bàn trong file sao lưu không hợp lệ.');
+  const rootHouseholds = Array.isArray(value.households)
+    ? value.households.filter(isRecord)
+    : [];
+  if (Array.isArray(value.households) && rootHouseholds.length !== value.households.length) {
+    throw new Error('Danh sách hộ trong file sao lưu không hợp lệ.');
+  }
+
+  let areaRecords = recordsFrom(value.areas);
+  if (areaRecords === null) {
+    const nestedCommuneAreas = value.communes.flatMap(rawCommune => {
+      if (!isRecord(rawCommune)) return [];
+      const nestedAreas = recordsFrom(rawCommune.areas);
+      return (nestedAreas || []).map(area => ({
+        ...area,
+        communeId: text(area.communeId, text(rawCommune.id)),
+        communeCode: text(area.communeCode, text(rawCommune.communeCode))
+      }));
+    });
+    areaRecords = nestedCommuneAreas.length > 0 ? nestedCommuneAreas : null;
+  }
+
+  if (areaRecords === null) {
+    const nestedAreaCollections = Object.entries(value)
+      .filter(([key, child]) => key !== 'communes' && key !== 'households')
+      .flatMap(([, child]) => recordsFrom(child) || [])
+      .filter(area => Array.isArray(area.households) && Boolean(area.id || area.areaId));
+    areaRecords = nestedAreaCollections.length > 0 ? nestedAreaCollections : null;
+  }
+
+  if (areaRecords === null && rootHouseholds.length > 0) {
+    const groups = new Map<string, Record<string, unknown>>();
+    rootHouseholds.forEach(household => {
+      const areaId = text(household.areaId);
+      const areaCode = text(household.areaCode);
+      const communeCode = text(household.communeCode);
+      const key = areaId || `${communeCode}_${areaCode}`;
+      if (!key) return;
+      const group = groups.get(key) || {
+        id: areaId || `area-${communeCode}-${areaCode}`,
+        communeId: text(household.communeId),
+        communeCode,
+        code: areaCode,
+        name: text(household.areaName),
+        households: []
+      };
+      (group.households as Record<string, unknown>[]).push(household);
+      groups.set(key, group);
+    });
+    areaRecords = Array.from(groups.values());
+  }
+
+  if (areaRecords === null) {
+    throw new Error(
+      `Không tìm thấy danh sách địa bàn trong backup. Các trường cấp ngoài: ${Object.keys(value).join(', ')}.`
+    );
   }
   if (areaRecords.some(area =>
     Array.isArray(area.households) && area.households.some(household => !isRecord(household))
@@ -123,12 +188,6 @@ export function parseLocalDataBackup(
       ? area.households.map(household => ({ area, household: household as Record<string, unknown> }))
       : []
   );
-  if (Array.isArray(value.households) && value.households.some(household => !isRecord(household))) {
-    throw new Error('Danh sách hộ trong file sao lưu không hợp lệ.');
-  }
-  const rootHouseholds = Array.isArray(value.households)
-    ? value.households.filter(isRecord)
-    : [];
   const householdsById = new Map<string, {
     area?: Record<string, unknown>;
     household: Record<string, unknown>;
