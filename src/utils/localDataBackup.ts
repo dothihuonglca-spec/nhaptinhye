@@ -23,8 +23,15 @@ export interface LocalDataBackupDiagnostics {
 }
 
 export interface SurveyorEntryBackupRecord {
-  id: string;
+  id?: string;
   areaKey?: string;
+  areaId?: string;
+  areaCode?: string;
+  communeId?: string;
+  communeCode?: string;
+  sttMau?: string;
+  assignedSurveyorId?: string;
+  assignedSurveyorName?: string;
   questionnaire: NonNullable<Household['questionnaire']>;
   surveyStatus?: Household['surveyStatus'];
   membersCount?: number;
@@ -37,6 +44,13 @@ export interface SurveyorEntryBackupRecord {
 export interface SurveyorEntryBackup {
   exportedAt?: string;
   entries: SurveyorEntryBackupRecord[];
+}
+
+interface RawSurveyorBackupRecord {
+  record: Record<string, unknown>;
+  area?: Record<string, unknown>;
+  surveyorId?: string;
+  surveyorName?: string;
 }
 
 const DATABASE_NAME = 'survey-local-data';
@@ -116,6 +130,27 @@ function number(value: unknown, fallback = 0): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+export function isCompletedSurveyStatus(status: unknown): boolean {
+  return typeof status === 'string' &&
+    ['DA_HOAN_THANH', 'DA_DUYET', 'COMPLETED', 'HOAN_THANH'].includes(status.toUpperCase());
+}
+
+export function hasCompletedSurveyContent(questionnaire: unknown): boolean {
+  const hasAnswer = (value: unknown, key = ''): boolean => {
+    if (['id', 'catalogId', 'surveyorName', 'surveyorDate'].includes(key)) return false;
+    if (key.endsWith('_has')) return value === true;
+    if (typeof value === 'number') return value > 0;
+    if (typeof value === 'string') return Boolean(value.trim());
+    if (typeof value === 'boolean') return value;
+    if (Array.isArray(value)) return value.some(item => hasAnswer(item));
+    if (isRecord(value)) {
+      return Object.entries(value).some(([childKey, child]) => hasAnswer(child, childKey));
+    }
+    return false;
+  };
+  return hasAnswer(questionnaire);
+}
+
 export function inspectLocalDataBackup(value: unknown): LocalDataBackupDiagnostics {
   const root = isRecord(value) ? value : {};
   const data = isRecord(root.data) ? root.data : {};
@@ -166,41 +201,123 @@ function recordsFrom(value: unknown): Record<string, unknown>[] | null {
 }
 
 export function parseSurveyorEntryBackup(value: unknown): SurveyorEntryBackup {
-  const isRawEntryArray = Array.isArray(value);
   const backup = isRecord(value) ? value : undefined;
-  if (!isRawEntryArray && (!backup || backup.format !== 'tnh-entries-backup' || backup.version !== 1)) {
-    throw new Error('Đây không phải file backup phiếu ĐTV được hỗ trợ.');
+  const candidates: RawSurveyorBackupRecord[] = [];
+  const addRecords = (
+    records: unknown,
+    area?: Record<string, unknown>,
+    surveyorId?: string,
+    surveyorName?: string
+  ) => {
+    const recordList = recordsFrom(records);
+    if (!recordList) return false;
+    if (recordList.some(record => !isRecord(record))) {
+      throw new Error('Danh sách phiếu trong file JSON có bản ghi không hợp lệ.');
+    }
+    recordList.forEach(record => {
+      const nestedRecord = isRecord(record.household)
+        ? record.household
+        : isRecord(record.entry)
+          ? record.entry
+          : undefined;
+      candidates.push({
+        record: nestedRecord ? { ...record, ...nestedRecord } : record,
+        ...(area ? { area } : {}),
+        ...(surveyorId ? { surveyorId } : {}),
+        ...(surveyorName ? { surveyorName } : {})
+      });
+    });
+  };
+
+  if (Array.isArray(value)) {
+    addRecords(value);
+  } else if (backup?.format === 'tnh-entries-backup' && backup.version === 1) {
+    addRecords(backup.entries);
+  } else if (backup) {
+    const data = isRecord(backup.data) ? backup.data : {};
+    const directEntries = recordsFrom(backup.entries) || recordsFrom(data.entries) || undefined;
+    if (directEntries) {
+      const hasNestedHouseholds = directEntries.some(entry =>
+        isRecord(entry) && Array.isArray(entry.households)
+      );
+      if (hasNestedHouseholds) {
+        directEntries.forEach(entry => {
+          if (!isRecord(entry) || !Array.isArray(entry.households)) return;
+          const area = isRecord(entry.area) ? entry.area : entry;
+          const surveyor = isRecord(entry.surveyor) ? entry.surveyor : {};
+          addRecords(
+            entry.households,
+            area,
+            text(entry.surveyorId, text(surveyor.id)),
+            text(entry.surveyorName, text(surveyor.name))
+          );
+        });
+      } else {
+        addRecords(directEntries);
+      }
+    } else {
+      const rootHouseholds = ['households', 'records', 'results', 'surveys']
+        .map(key => recordsFrom(backup[key]) || recordsFrom(data[key]))
+        .find(records => records !== null);
+      if (rootHouseholds) {
+        addRecords(rootHouseholds);
+      } else {
+        for (const collectionName of ['areas', 'surveyAreas', 'rosters'] as const) {
+          const areas = recordsFrom(backup[collectionName]) || recordsFrom(data[collectionName]);
+          if (!areas?.some(area => Array.isArray(area.households))) continue;
+          areas.forEach(area => {
+            const owner = isRecord(area.surveyor) ? area.surveyor : {};
+            addRecords(
+              area.households,
+              area,
+              text(area.assignedSurveyorId, text(area.ownerId, text(owner.id))),
+              text(area.assignedSurveyorName, text(area.ownerName, text(owner.name)))
+            );
+          });
+          break;
+        }
+      }
+    }
   }
-  const rawEntries = isRawEntryArray ? value : backup?.entries;
-  if (!Array.isArray(rawEntries) || rawEntries.length === 0) {
+
+  if (candidates.length === 0) {
     throw new Error('File backup không có danh sách phiếu.');
   }
 
   const ids = new Set<string>();
-  const entries = rawEntries.map((record): SurveyorEntryBackupRecord => {
+  const entries = candidates.map(({ record, area, surveyorId, surveyorName }): SurveyorEntryBackupRecord => {
+    const id = text(record.id);
+    const communeCode = text(record.communeCode, text(area?.communeCode));
+    const areaCode = text(record.areaCode, text(area?.areaCode, text(area?.code)));
+    const sttMau = text(record.sttMau, text(record.sampleNumber, text(record.householdNumber)));
+    const areaId = text(record.areaId, text(area?.areaId, text(area?.id)));
+    const communeId = text(record.communeId, text(area?.communeId));
+    const questionnaireValue = isRecord(record.questionnaire)
+      ? record.questionnaire
+      : isRecord(record.form)
+        ? record.form
+        : undefined;
     if (
-      !isRecord(record) ||
-      typeof record.id !== 'string' ||
-      !record.id ||
-      (!isRawEntryArray && (
-        typeof record.areaKey !== 'string' ||
-        !record.areaKey
-      )) ||
-      !isRecord(record.questionnaire)
+      (!id && !(areaCode && sttMau && (communeCode || communeId || areaId))) ||
+      !questionnaireValue
     ) {
-      throw new Error('File backup có phiếu thiếu mã hộ, địa bàn hoặc nội dung phiếu.');
+      throw new Error('File JSON có phiếu thiếu mã hộ/địa bàn hoặc nội dung bảng hỏi.');
     }
-    if (ids.has(record.id)) {
+    const uniqueId = id || `${communeCode || communeId || areaId}_${areaCode}_${sttMau}`;
+    if (ids.has(uniqueId)) {
       throw new Error('File backup có mã hộ bị lặp; chưa khôi phục dữ liệu nào.');
     }
-    ids.add(record.id);
+    ids.add(uniqueId);
 
     const validStatuses = [
       'PENDING', 'IN_PROGRESS', 'COMPLETED', 'CHUA_NHAP',
       'DANG_NHAP', 'HOAN_THANH', 'DA_HOAN_THANH', 'DA_DUYET'
     ];
+    const normalizedStatus = typeof record.surveyStatus === 'string'
+      ? record.surveyStatus.toUpperCase()
+      : undefined;
     if (record.surveyStatus !== undefined &&
-      (typeof record.surveyStatus !== 'string' || !validStatuses.includes(record.surveyStatus))) {
+      (!normalizedStatus || !validStatuses.includes(normalizedStatus))) {
       throw new Error('File backup có trạng thái phiếu không hợp lệ.');
     }
     for (const field of ['membersCount', 'workingMembersCount'] as const) {
@@ -214,14 +331,25 @@ export function parseSurveyorEntryBackup(value: unknown): SurveyorEntryBackup {
     }
 
     return {
-      id: record.id,
+      ...(id ? { id } : {}),
       ...(typeof record.areaKey === 'string' ? { areaKey: record.areaKey } : {}),
+      ...(areaId ? { areaId } : {}),
+      ...(areaCode ? { areaCode } : {}),
+      ...(communeId ? { communeId } : {}),
+      ...(communeCode ? { communeCode } : {}),
+      ...(sttMau ? { sttMau } : {}),
+      ...(text(record.assignedSurveyorId, surveyorId)
+        ? { assignedSurveyorId: text(record.assignedSurveyorId, surveyorId) }
+        : {}),
+      ...(text(record.assignedSurveyorName, text(record.updatedBy, text(questionnaireValue.surveyorName, surveyorName)))
+        ? { assignedSurveyorName: text(record.assignedSurveyorName, text(record.updatedBy, text(questionnaireValue.surveyorName, surveyorName))) }
+        : {}),
       questionnaire: {
         ...createDefaultQuestionnaire(),
-        ...record.questionnaire
+        ...questionnaireValue
       },
-      ...(typeof record.surveyStatus === 'string'
-        ? { surveyStatus: record.surveyStatus as Household['surveyStatus'] }
+      ...(normalizedStatus
+        ? { surveyStatus: normalizedStatus as Household['surveyStatus'] }
         : {}),
       ...(typeof record.membersCount === 'number' ? { membersCount: record.membersCount } : {}),
       ...(typeof record.membersCountEntered === 'boolean'
