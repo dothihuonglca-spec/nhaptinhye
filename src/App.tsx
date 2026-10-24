@@ -11,7 +11,7 @@ import {
   AlertCircle, RefreshCw, Filter, Search, ChevronRight, ChevronLeft, ChevronsLeft, ChevronsRight,
   Check, Cloud, FileText, Loader2, TableProperties, MapPin, Building2, Hash, BookOpen, Copy, 
   Shield, ShieldCheck, Lock, Unlock, Eye, EyeOff, CheckSquare, Square, UserCheck, ShieldAlert, AlertTriangle, X,
-  LogOut, LogIn, KeyRound, User, TrendingUp, ExternalLink, RotateCcw
+  LogOut, LogIn, KeyRound, User, TrendingUp, ExternalLink, RotateCcw, ArrowRightLeft
 } from 'lucide-react';
 import { db } from './firebase';
 import { collection, doc, setDoc, onSnapshot } from 'firebase/firestore';
@@ -27,6 +27,8 @@ import { IncomeMacroControl } from './components/IncomeMacroControl';
 import { ReplaceHouseholdModal } from './components/ReplaceHouseholdModal';
 import IndustrialSurveyModule from './components/IndustrialSurveyModule';
 import AreaDataTransferModal from './components/AreaDataTransferModal';
+import DataExchangeView, { type ExchangeAction } from './components/DataExchangeView';
+import type { CloudStatus } from './components/CloudReconcilePanel';
 import { IndustrialSurveyPage } from './modules/industrialSurvey';
 import bannerImg from './assets/images/background-ngoai-troi-dep_042633251.jpg';
 import { OFFICIAL_COMMUNES_CATALOG } from './data/communesCatalog';
@@ -195,7 +197,7 @@ export default function App() {
     return 'household'; // Mặc định mở Trang Quản lý Thống kê Thu nhập Hộ gia đình
   });
 
-  const [activeTab, setActiveTab] = useState<'industrial_survey' | 'import' | 'entry' | 'surveyor_progress' | 'tnh' | 'macro_control' | 'database' | 'catalog' | 'surveyors'>('entry');
+  const [activeTab, setActiveTab] = useState<'industrial_survey' | 'import' | 'entry' | 'surveyor_progress' | 'tnh' | 'macro_control' | 'database' | 'catalog' | 'surveyors' | 'data_exchange'>('entry');
   
   const [communes, setCommunes] = useState<Commune[]>(() => {
     try {
@@ -285,6 +287,8 @@ export default function App() {
   const [loading, setLoading] = useState<boolean>(false);
   const [localDataReady, setLocalDataReady] = useState<boolean>(false);
   const [cloudProgress, setCloudProgress] = useState<AreaProgressSnapshot[]>([]);
+  const [cloudStatus, setCloudStatus] = useState<CloudStatus>({ state: 'idle' });
+  const [cloudReloadKey, setCloudReloadKey] = useState<number>(0);
   
   // Real Login & Authentication States
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(false);
@@ -333,6 +337,8 @@ export default function App() {
   const [isDuyetDiaBanModalOpen, setIsDuyetDiaBanModalOpen] = useState<boolean>(false);
   const [isDataTransferModalOpen, setIsDataTransferModalOpen] = useState<boolean>(false);
   const [dataTransferMode, setDataTransferMode] = useState<'export' | 'import'>('export');
+  const [dataTransferImportKind, setDataTransferImportKind] = useState<'auto' | 'package'>('auto');
+  const [dataTransferLocked, setDataTransferLocked] = useState<boolean>(false);
 
   // Pagination state for Household Table
   const [currentPage, setCurrentPage] = useState<number>(1);
@@ -515,27 +521,41 @@ export default function App() {
     if (hasRepair) setHouseholds(repairedHouseholds);
   }, [households]);
 
+  // Lắng nghe tiến độ Firebase ngay khi Admin/Quản lý/Giám sát đăng nhập (không chờ mở tab Tiến độ),
+  // và báo rõ trạng thái + mã lỗi để biết vì sao không tải được.
+  const canReadCloudProgress = isLoggedIn && currentSurveyorId !== '' &&
+    (surveyors.find(s => s.id === currentSurveyorId)?.role ?? 'ADMIN') !== 'SURVEYOR';
   useEffect(() => {
-    if (!isLoggedIn || activeTab !== 'surveyor_progress') return;
-    const unsubscribe = onSnapshot(collection(db, 'areaProgress'), snapshot => {
-      const progress = snapshot.docs.map(document => document.data() as AreaProgressSnapshot)
-        .filter(item =>
-          typeof item.id === 'string' &&
-          typeof item.areaId === 'string' &&
-          typeof item.totalHouseholds === 'number' &&
-          typeof item.completedHouseholds === 'number' &&
-          typeof item.inProgressHouseholds === 'number'
-        );
+    if (!canReadCloudProgress) return;
+    setCloudStatus(prev => ({ ...prev, state: 'loading', code: undefined, message: undefined }));
+    const unsubscribe = onSnapshot(collection(db, 'areaProgress'), { includeMetadataChanges: true }, snapshot => {
+      const all = snapshot.docs.map(document => document.data() as AreaProgressSnapshot);
+      const progress = all.filter(item =>
+        typeof item.id === 'string' &&
+        typeof item.areaId === 'string' &&
+        typeof item.totalHouseholds === 'number' &&
+        typeof item.completedHouseholds === 'number' &&
+        typeof item.inProgressHouseholds === 'number'
+      );
       setCloudProgress(progress);
+      setCloudStatus({
+        state: 'ok',
+        fromCache: snapshot.metadata.fromCache,
+        lastSyncAt: new Date().toISOString(),
+        docCount: progress.length,
+        ignoredCount: all.length - progress.length
+      });
     }, err => {
+      const code = (err as { code?: string })?.code || 'unknown';
       console.error('Không thể đọc số đếm tiến độ từ Firebase:', err);
+      setCloudStatus({ state: 'error', code, message: err instanceof Error ? err.message : String(err) });
       setNotification({
         type: 'error',
-        message: 'Không tải được tiến độ từ Firebase. Dữ liệu bảng kê và phiếu cục bộ vẫn được giữ nguyên.'
+        message: `Không tải được tiến độ từ Firebase (${code}). Mở tab "3. Tiến độ ĐTV" để xem nguyên nhân chi tiết. Dữ liệu cục bộ vẫn được giữ nguyên.`
       });
     });
     return () => unsubscribe();
-  }, [activeTab, isLoggedIn]);
+  }, [canReadCloudProgress, cloudReloadKey]);
 
   const currentUser: Surveyor = useMemo(() => {
     const found = surveyors.find(s => s.id === currentSurveyorId);
@@ -6303,6 +6323,18 @@ export default function App() {
             <span className={activeTab === 'catalog' ? 'text-teal-950 font-black' : 'text-white'}>7. Danh mục tra cứu</span>
           </button>
 
+          <button 
+            onClick={() => setActiveTab('data_exchange')}
+            className={`px-3.5 py-2 flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap rounded-t-md font-bold ${
+              activeTab === 'data_exchange' 
+                ? 'bg-white text-teal-950 shadow-md border-t-2 border-x border-slate-300 border-t-amber-500 font-black' 
+                : 'text-white hover:bg-teal-700/80 border-transparent'
+            }`}
+          >
+            <ArrowRightLeft className={`w-4 h-4 ${activeTab === 'data_exchange' ? 'text-teal-800' : 'text-sky-200'}`} />
+            <span className={activeTab === 'data_exchange' ? 'text-teal-950 font-black' : 'text-white'}>Xuất nhập dữ liệu</span>
+          </button>
+
           {(currentUser.role === 'ADMIN' || currentUser.role === 'SUPERVISOR') && (
             <button 
               onClick={() => setActiveTab('surveyors')}
@@ -6548,148 +6580,9 @@ export default function App() {
               </span>
             )}
 
-            {currentUser.role === 'ADMIN' && (
-              <>
-                <button
-                  type="button"
-                  onClick={handleExportLocalBackup}
-                  className="h-8 px-3 bg-slate-700 hover:bg-slate-600 text-white rounded border border-slate-600 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-                  title="Tải bản sao lưu đầy đủ dữ liệu cục bộ về thiết bị"
-                >
-                  <Database className="w-4 h-4" />
-                  <span>Sao lưu JSON</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleExportPreRestoreBackup}
-                  className="h-8 px-3 bg-slate-600 hover:bg-slate-500 text-white rounded border border-slate-500 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-                  title="Tải bản sao lưu được giữ lại trước lần khôi phục gần nhất"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>Tải backup cũ</span>
-                </button>
-                <label
-                  className="h-8 px-3 bg-amber-700 hover:bg-amber-600 text-white rounded border border-amber-600 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-                  title="Khôi phục toàn bộ dữ liệu từ file backup JSON trên thiết bị"
-                >
-                  <Upload className="w-4 h-4" />
-                  <span>Khôi phục backup JSON</span>
-                  <input
-                    type="file"
-                    accept=".json,application/json"
-                    className="hidden"
-                    onChange={handleRestoreLocalBackup}
-                  />
-                </label>
-              </>
-            )}
-            {currentUser.role === 'SURVEYOR' && (
-              <>
-                <button
-                  type="button"
-                  onClick={handleExportSurveyorBackup}
-                  className="h-8 px-3 bg-slate-700 hover:bg-slate-600 text-white rounded border border-slate-600 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-                  title="Tải backup chỉ gồm địa bàn và hộ được giao cho tài khoản ĐTV này"
-                >
-                  <Database className="w-4 h-4" />
-                  <span>Sao lưu của tôi</span>
-                </button>
-                <label
-                  className="h-8 px-3 bg-amber-700 hover:bg-amber-600 text-white rounded border border-amber-600 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-                  title="Khôi phục backup cá nhân đã xuất bằng chính tài khoản ĐTV này"
-                >
-                  <Upload className="w-4 h-4" />
-                  <span>Khôi phục backup của tôi</span>
-                  <input
-                    type="file"
-                    accept=".json,application/json"
-                    className="hidden"
-                    onChange={handleRestoreLocalBackup}
-                  />
-                </label>
-                <label
-                  className="h-8 px-3 bg-teal-800 hover:bg-teal-700 text-white rounded border border-teal-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
-                  title="Nạp file backup.json chỉ chứa phiếu, ghép vào các hộ đã được giao cho tài khoản này"
-                >
-                  <Upload className="w-4 h-4" />
-                  <span>Khôi phục phiếu backup.json</span>
-                  <input
-                    type="file"
-                    accept=".json,application/json"
-                    className="hidden"
-                    onChange={handleRestoreSurveyorEntryBackup}
-                  />
-                </label>
-              </>
-            )}
-
-            <button 
-              onClick={handleExportEnteredQuestionnairesExcel} 
-              className="h-8 px-3.5 bg-teal-800 hover:bg-teal-700 active:bg-teal-900 text-xs font-bold rounded border border-teal-700 text-white flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
-              title="Xuất file Excel đầy đủ nội dung thông tin các phiếu đã nhập tin"
-            >
-              <FileSpreadsheet className="w-4 h-4" />
-              <span>Xuất Excel Phiếu Đã Nhập</span>
-            </button>
-
-            {/* TRAO ĐỔI DỮ LIỆU ĐỊA BÀN (JSON) THEO ID ĐỊA BÀN [MãXã]_[MãĐB].json */}
-            {(currentUser?.role === 'ADMIN' || currentUser?.role === 'SUPERVISOR') ? (
-              <>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setDataTransferMode('export');
-                    setIsDataTransferModalOpen(true);
-                  }}
-                  className="h-8 px-3.5 bg-sky-800 hover:bg-sky-700 active:bg-sky-900 text-xs font-bold rounded border border-sky-700 text-white flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
-                  title="Xuất file JSON [MãXã]_[MãĐB].json dữ liệu bảng kê phân quyền cho từng Điều tra viên"
-                >
-                  <Download className="w-4 h-4 text-amber-300" />
-                  <span>Xuất Data Bảng Kê Cho ĐTV (.json)</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setDataTransferMode('import');
-                    setIsDataTransferModalOpen(true);
-                  }}
-                  className="h-8 px-3.5 bg-emerald-800 hover:bg-emerald-700 active:bg-emerald-900 text-xs font-bold rounded border border-emerald-700 text-white flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
-                  title="Nhập và tổng hợp các file JSON do Điều tra viên gửi về"
-                >
-                  <Upload className="w-4 h-4 text-emerald-200" />
-                  <span>Giao nhận JSON ĐTV</span>
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setDataTransferMode('import');
-                    setIsDataTransferModalOpen(true);
-                  }}
-                  className="h-8 px-3.5 bg-emerald-700 hover:bg-emerald-600 active:bg-emerald-800 text-xs font-bold rounded border border-emerald-600 text-white flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
-                  title="Nạp file JSON do Admin gửi để nhận danh sách hộ địa bàn phụ trách"
-                >
-                  <Upload className="w-4 h-4 text-white" />
-                  <span>Nhập Data Địa Bàn (.json)</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setDataTransferMode('export');
-                    setIsDataTransferModalOpen(true);
-                  }}
-                  className="h-8 px-3.5 bg-sky-700 hover:bg-sky-600 active:bg-sky-800 text-xs font-bold rounded border border-sky-600 text-white flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
-                  title="Xuất dữ liệu địa bàn đã hoàn thành / mới sửa để gửi Admin"
-                >
-                  <Download className="w-4 h-4 text-amber-300" />
-                  <span>Xuất Data Mới Làm Gửi Admin (.json)</span>
-                </button>
-              </>
-            )}
+            <span className="text-slate-500 text-xs hidden md:inline">
+              Xuất/nhập dữ liệu: tab <strong className="text-teal-800">Xuất nhập dữ liệu</strong>
+            </span>
           </div>
         </div>
       </div>
@@ -7123,15 +7016,42 @@ export default function App() {
             communes={communes}
             currentUser={currentUser}
             cloudProgress={cloudProgress}
+            cloudStatus={cloudStatus}
+            onReloadCloud={() => setCloudReloadKey(k => k + 1)}
+            onOpenImportTab={() => setActiveTab('import')}
             onOpenHouseholdForm={(hh) => {
               setActiveHouseholdForm(hh);
             }}
             onNavigateToHouseholdEntry={handleNavigateToHouseholdEntryFromProgress}
-            onOpenDataTransfer={() => {
-              setDataTransferMode('import');
+            onOpenDataTransfer={() => setActiveTab('data_exchange')}
+            showNotification={showNotification}
+          />
+        )}
+
+        {/* TAB: XUẤT NHẬP DỮ LIỆU - gom toàn bộ nút xuất/nhập/sao lưu/giao nhận JSON */}
+        {activeTab === 'data_exchange' && (
+          <DataExchangeView
+            currentUser={currentUser}
+            householdCount={households.length}
+            areaCount={areas.length}
+            communeCount={communes.length}
+            onOpenTransfer={(action: ExchangeAction) => {
+              setDataTransferLocked(true);
+              if (action.type === 'export-package') {
+                setDataTransferMode('export');
+              } else {
+                setDataTransferMode('import');
+                setDataTransferImportKind(action.type === 'import-package' ? 'package' : 'auto');
+              }
               setIsDataTransferModalOpen(true);
             }}
-            showNotification={showNotification}
+            onExportLocalBackup={handleExportLocalBackup}
+            onExportPreRestoreBackup={handleExportPreRestoreBackup}
+            onRestoreLocalBackup={handleRestoreLocalBackup}
+            onExportSurveyorBackup={handleExportSurveyorBackup}
+            onRestoreSurveyorEntryBackup={handleRestoreSurveyorEntryBackup}
+            onExportEnteredExcel={handleExportEnteredQuestionnairesExcel}
+            onGoToProgress={() => setActiveTab('surveyor_progress')}
           />
         )}
 
@@ -8842,7 +8762,7 @@ export default function App() {
       {isDataTransferModalOpen && (
         <AreaDataTransferModal
           isOpen={isDataTransferModalOpen}
-          onClose={() => setIsDataTransferModalOpen(false)}
+          onClose={() => { setIsDataTransferModalOpen(false); setDataTransferLocked(false); }}
           currentUser={currentUser}
           surveyors={surveyors}
           departments={departments}
@@ -8853,6 +8773,8 @@ export default function App() {
           onApplySurveyorBackup={handleApplySurveyorBackup}
           showNotification={showNotification}
           initialMode={dataTransferMode}
+          importKind={dataTransferImportKind}
+          lockMode={dataTransferLocked}
         />
       )}
 
