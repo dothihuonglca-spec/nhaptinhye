@@ -671,3 +671,135 @@ export function mergeImportedAreaData(
     };
   }
 }
+
+// ---------------------------------------------------------------------------
+// Đối chiếu tiến độ Firebase với dữ liệu trên máy Admin
+// ---------------------------------------------------------------------------
+
+export type CloudReconcileStatus =
+  | 'MISSING_COMMUNE'   // Xã chưa có trong danh mục trên máy Admin
+  | 'MISSING_AREA'      // Có xã nhưng chưa tải bảng kê/địa bàn này về máy
+  | 'BEHIND'            // Có địa bàn nhưng máy Admin ít phiếu hoàn thành hơn Firebase
+  | 'SURVEYOR_MISMATCH' // Firebase có bản ghi nhưng không khớp ĐTV đang được phân công
+  | 'IN_SYNC';          // Máy Admin đã đủ so với Firebase
+
+export interface CloudReconcileItem {
+  key: string;
+  status: CloudReconcileStatus;
+  snapshot: AreaProgressSnapshot;
+  localCompleted: number;
+  localTotal: number;
+}
+
+export const CLOUD_RECONCILE_LABELS: Record<CloudReconcileStatus, string> = {
+  MISSING_COMMUNE: 'Chưa có xã trong danh mục máy Admin',
+  MISSING_AREA: 'Chưa tải bảng kê/địa bàn về máy Admin',
+  BEHIND: 'Máy Admin thiếu phiếu so với Firebase',
+  SURVEYOR_MISMATCH: 'Lệch ĐTV phụ trách',
+  IN_SYNC: 'Đã khớp'
+};
+
+/**
+ * So từng bản ghi tiến độ trên Firebase với địa bàn/hộ đang có trên máy Admin.
+ * Mỗi (xã, địa bàn) chỉ trả về một dòng: bản ghi Firebase mới nhất.
+ */
+export function reconcileCloudProgress(
+  cloudProgress: AreaProgressSnapshot[],
+  communes: Commune[],
+  areas: SurveyArea[],
+  households: Household[],
+  surveyors: Surveyor[]
+): CloudReconcileItem[] {
+  const time = (s: AreaProgressSnapshot) => {
+    const t = Date.parse(s.updatedAt || '');
+    return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
+  };
+
+  const communeByAny = new Map<string, Commune>();
+  communes.forEach(c => {
+    if (c.id) communeByAny.set(c.id.trim(), c);
+    if (c.communeCode) communeByAny.set(c.communeCode.trim(), c);
+  });
+  const resolveCode = (communeId?: string, communeCode?: string) =>
+    (communeByAny.get((communeCode || '').trim()) || communeByAny.get((communeId || '').trim()))?.communeCode?.trim() ||
+    (communeCode || '').trim();
+
+  const localAreaKeys = new Set<string>();
+  areas.forEach(a => {
+    const key = getAreaProgressKey(resolveCode(a.communeId, a.communeCode), a.code);
+    if (key) localAreaKeys.add(key);
+  });
+  const householdsByKey = new Map<string, Household[]>();
+  households.forEach(h => {
+    const key = getAreaProgressKey(resolveCode(h.communeId, h.communeCode), h.areaCode);
+    if (!key) return;
+    localAreaKeys.add(key);
+    const list = householdsByKey.get(key) || [];
+    list.push(h);
+    householdsByKey.set(key, list);
+  });
+
+  // Mỗi địa bàn giữ lại bản ghi Firebase mới nhất; gom thêm danh sách ĐTV có bản ghi
+  const latestByKey = new Map<string, AreaProgressSnapshot>();
+  const allByKey = new Map<string, AreaProgressSnapshot[]>();
+  cloudProgress.forEach(snapshot => {
+    const key = getAreaProgressKey(snapshot.communeCode, snapshot.areaCode) || `id:${snapshot.areaId}`;
+    const list = allByKey.get(key) || [];
+    list.push(snapshot);
+    allByKey.set(key, list);
+    const best = latestByKey.get(key);
+    if (!best || time(snapshot) >= time(best)) latestByKey.set(key, snapshot);
+  });
+
+  // ĐTV được phân công theo từng địa bàn (từ quyền địa bàn + hộ đã gán)
+  const surveyorIdsByKey = new Map<string, Set<string>>();
+  const addOwner = (key: string, id: string) => {
+    if (!key || !id) return;
+    const set = surveyorIdsByKey.get(key) || new Set<string>();
+    set.add(id);
+    surveyorIdsByKey.set(key, set);
+  };
+  areas.forEach(area => {
+    const key = getAreaProgressKey(resolveCode(area.communeId, area.communeCode), area.code);
+    surveyors.forEach(s => {
+      if (s.role !== 'SURVEYOR') return;
+      if (isAreaAssigned({ ...area, communeId: area.communeId }, s.assignedAreas || [])) addOwner(key, s.id);
+    });
+  });
+  householdsByKey.forEach((list, key) => {
+    list.forEach(h => h.assignedSurveyorId && addOwner(key, h.assignedSurveyorId));
+  });
+
+  const result: CloudReconcileItem[] = [];
+  latestByKey.forEach((snapshot, key) => {
+    const official = selectOfficialHouseholds(householdsByKey.get(key) || []);
+    const localCompleted = official.filter(h => isCompletedSurveyStatus(h.surveyStatus)).length;
+    const localTotal = official.length;
+    const communeCode = (snapshot.communeCode || '').trim();
+    const hasCommune = communeByAny.has(communeCode) || communeByAny.has((snapshot.communeId || '').trim());
+
+    let status: CloudReconcileStatus;
+    if (!localAreaKeys.has(key)) {
+      status = hasCommune ? 'MISSING_AREA' : 'MISSING_COMMUNE';
+    } else if (localTotal === 0) {
+      status = 'MISSING_AREA';
+    } else if (localCompleted < snapshot.completedHouseholds) {
+      status = 'BEHIND';
+    } else {
+      const owners = surveyorIdsByKey.get(key);
+      const anyOwnerMatches = !owners || owners.size === 0 ||
+        (allByKey.get(key) || []).some(s => owners.has(s.surveyorId));
+      status = anyOwnerMatches ? 'IN_SYNC' : 'SURVEYOR_MISMATCH';
+    }
+    result.push({ key, status, snapshot, localCompleted, localTotal });
+  });
+
+  const order: Record<CloudReconcileStatus, number> = {
+    MISSING_COMMUNE: 0, MISSING_AREA: 1, BEHIND: 2, SURVEYOR_MISMATCH: 3, IN_SYNC: 4
+  };
+  return result.sort((a, b) =>
+    order[a.status] - order[b.status] ||
+    a.snapshot.communeCode.localeCompare(b.snapshot.communeCode, 'vi', { numeric: true }) ||
+    a.snapshot.areaCode.localeCompare(b.snapshot.areaCode, 'vi', { numeric: true })
+  );
+}
