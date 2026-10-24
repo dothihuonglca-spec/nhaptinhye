@@ -230,6 +230,16 @@ export function parseSurveyorEntryBackup(value: unknown): SurveyorEntryBackup {
   };
 
   const isIndexedDbBackup = Boolean(backup && isRecord(backup.thongke_entries_v2));
+  const indexedDbHouseholdsById = new Map<string, Record<string, unknown>>();
+  const indexedDbRosterStore = backup && isRecord(backup.thongke_roster_cache_v1)
+    ? backup.thongke_roster_cache_v1
+    : undefined;
+  (recordsFrom(indexedDbRosterStore?.rosters) || []).forEach(roster => {
+    (recordsFrom(roster.households) || []).forEach(household => {
+      const id = text(household.id);
+      if (id) indexedDbHouseholdsById.set(id, household);
+    });
+  });
 
   if (Array.isArray(value)) {
     addRecords(value);
@@ -297,12 +307,16 @@ export function parseSurveyorEntryBackup(value: unknown): SurveyorEntryBackup {
   const entries = candidates.map(({ record, area, surveyorId, surveyorName }): SurveyorEntryBackupRecord => {
     const id = text(record.id);
     const idLocation = id.match(/^hh-c-(\d+)-(\d+)-(.+)$/i);
-    const communeCode = text(record.communeCode, text(area?.communeCode, idLocation?.[1]));
-    const areaCode = text(record.areaCode, text(area?.areaCode, text(area?.code, idLocation?.[2])));
-    const sttMau = text(record.sttMau, text(record.sampleNumber, text(record.householdNumber, idLocation?.[3])));
+    const rosterHousehold = indexedDbHouseholdsById.get(id);
+    const communeCode = text(record.communeCode, text(rosterHousehold?.communeCode, text(area?.communeCode, idLocation?.[1])));
+    const areaCode = text(record.areaCode, text(rosterHousehold?.areaCode, text(area?.areaCode, text(area?.code, idLocation?.[2]))));
+    const sttMau = text(
+      record.sttMau,
+      text(record.sampleNumber, text(record.householdNumber, text(rosterHousehold?.sttMau, idLocation?.[3])))
+    );
     const areaKey = text(record.areaKey);
-    const areaId = text(record.areaId, text(area?.areaId, text(area?.id)));
-    const communeId = text(record.communeId, text(area?.communeId));
+    const areaId = text(record.areaId, text(rosterHousehold?.areaId, text(area?.areaId, text(area?.id))));
+    const communeId = text(record.communeId, text(rosterHousehold?.communeId, text(area?.communeId)));
     const questionnaireValue = isRecord(record.questionnaire)
       ? record.questionnaire
       : isRecord(record.form)

@@ -3880,7 +3880,10 @@ export default function App() {
       }
 
       let householdIndex: number | undefined;
-      if ((entry.areaCode || entry.areaKey) && entry.sttMau) {
+      if (entry.id) {
+        householdIndex = householdIndexById.get(entry.id);
+      }
+      if (householdIndex === undefined && (entry.areaCode || entry.areaKey) && entry.sttMau) {
         const communeCode = entry.communeCode?.trim() || '';
         const areaCode = entry.areaCode ? normalizeAreaCode(entry.areaCode) : '';
         const sampleNumber = normalizeSampleNumber(entry.sttMau);
@@ -3897,9 +3900,6 @@ export default function App() {
           ambiguousCount++;
           continue;
         }
-      }
-      if (householdIndex === undefined && entry.id) {
-        householdIndex = householdIndexById.get(entry.id);
       }
       if (householdIndex === undefined) {
         unmatchedCount++;
