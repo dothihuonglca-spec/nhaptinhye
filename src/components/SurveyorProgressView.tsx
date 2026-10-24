@@ -317,7 +317,13 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
         .forEach(item => {
           const key = item.surveyorId || item.surveyorName || item.id;
           const existing = remoteProgressBySurveyor.get(key);
-          if (!existing || Date.parse(item.updatedAt) >= Date.parse(existing.updatedAt)) {
+          const itemUpdatedAt = Date.parse(item.updatedAt || '');
+          const existingUpdatedAt = existing ? Date.parse(existing.updatedAt || '') : Number.NEGATIVE_INFINITY;
+          if (
+            !existing ||
+            (Number.isFinite(itemUpdatedAt) &&
+              (!Number.isFinite(existingUpdatedAt) || itemUpdatedAt >= existingUpdatedAt))
+          ) {
             remoteProgressBySurveyor.set(key, item);
           }
         });
