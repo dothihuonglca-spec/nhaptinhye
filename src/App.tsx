@@ -3376,7 +3376,7 @@ export default function App() {
           `${household.communeId}_${household.areaCode}`,
           `${household.communeCode}-${household.areaCode}`
         ].filter((key): key is string => Boolean(key));
-        if (!isAssignedToUser || !expectedAreaKeys.includes(entry.areaKey)) {
+        if (!isAssignedToUser || (entry.areaKey && !expectedAreaKeys.includes(entry.areaKey))) {
           outOfScopeCount++;
           return;
         }
