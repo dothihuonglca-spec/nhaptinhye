@@ -46,6 +46,13 @@ interface AreaProgressItem {
   householdsList: Household[];
 }
 
+type ProgressNoticeType = 'areas' | 'completedAreas' | 'assigned' | 'completed' | 'inProgress' | 'notEntered';
+
+interface ProgressNotice {
+  title: string;
+  type: ProgressNoticeType;
+}
+
 export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
   surveyors,
   households,
@@ -63,6 +70,7 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
   const [progressStatusFilter, setProgressStatusFilter] = useState<'ALL' | 'DONE' | 'DOING' | 'NOT_STARTED'>('ALL');
   const [viewMode, setViewMode] = useState<'grid' | 'grouped'>('grid');
   const [selectedAreaDetail, setSelectedAreaDetail] = useState<AreaProgressItem | null>(null);
+  const [progressNotice, setProgressNotice] = useState<ProgressNotice | null>(null);
 
   // Danh sách xã được phép truy cập theo phân quyền
   const allowedCommunes = useMemo(() => {
@@ -253,9 +261,14 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
 
       const localTotalHouseholds = assignedHHs.length;
       const localCompletedHouseholds = assignedHHs.filter(h =>
-        h.surveyStatus === 'DA_DUYET' || h.surveyStatus === 'DA_HOAN_THANH'
+        h.surveyStatus === 'DA_DUYET' ||
+        h.surveyStatus === 'DA_HOAN_THANH' ||
+        h.surveyStatus === 'COMPLETED' ||
+        h.surveyStatus === 'HOAN_THANH'
       ).length;
-      const localInProgressHouseholds = assignedHHs.filter(h => h.surveyStatus === 'DANG_NHAP').length;
+      const localInProgressHouseholds = assignedHHs.filter(h =>
+        h.surveyStatus === 'DANG_NHAP' || h.surveyStatus === 'IN_PROGRESS'
+      ).length;
 
       // Tìm tên người nhập / ĐTV phụ trách địa bàn này
       const surveyorSet = new Set<string>();
@@ -404,6 +417,45 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
     };
   }, [filteredProgressList]);
 
+  const progressNoticeAreas = useMemo(() => {
+    if (progressNotice?.type === 'areas') return filteredProgressList;
+    if (progressNotice?.type === 'completedAreas') {
+      return filteredProgressList.filter(item =>
+        item.totalHouseholds > 0 && item.completionRate === 100
+      );
+    }
+    return [];
+  }, [filteredProgressList, progressNotice]);
+
+  const progressNoticeHouseholds = useMemo(() => {
+    if (!progressNotice || progressNotice.type === 'areas' || progressNotice.type === 'completedAreas') return [];
+    const matchingHouseholds = filteredProgressList.flatMap(item =>
+      item.householdsList
+        .filter(household => {
+          const isComplete =
+            household.surveyStatus === 'DA_HOAN_THANH' ||
+            household.surveyStatus === 'DA_DUYET' ||
+            household.surveyStatus === 'COMPLETED' ||
+            household.surveyStatus === 'HOAN_THANH';
+          const isInProgress =
+            household.surveyStatus === 'DANG_NHAP' ||
+            household.surveyStatus === 'IN_PROGRESS';
+          if (progressNotice.type === 'assigned') return true;
+          if (progressNotice.type === 'completed') return isComplete;
+          if (progressNotice.type === 'inProgress') return isInProgress;
+          return !isComplete && !isInProgress;
+        })
+        .map(household => ({ household, area: item }))
+    );
+    const uniqueHouseholds = new Map<string, (typeof matchingHouseholds)[number]>();
+    matchingHouseholds.forEach(item => {
+      if (!uniqueHouseholds.has(item.household.id)) {
+        uniqueHouseholds.set(item.household.id, item);
+      }
+    });
+    return Array.from(uniqueHouseholds.values());
+  }, [filteredProgressList, progressNotice]);
+
   // Xuất file Excel báo cáo tiến độ
   const handleExportExcelProgress = () => {
     try {
@@ -501,30 +553,60 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
 
         {/* KPI Mini Cards */}
         <div className="grid grid-cols-2 md:grid-cols-6 gap-2.5">
-          <div className="bg-sky-50 border border-sky-200 rounded p-2.5 flex flex-col">
+          <button
+            type="button"
+            onClick={() => setProgressNotice({ title: 'Danh sách địa bàn', type: 'areas' })}
+            className="text-left bg-sky-50 border border-sky-200 hover:border-sky-400 hover:bg-sky-100 rounded p-2.5 flex flex-col cursor-pointer transition-colors"
+            title="Bấm để xem các địa bàn trong phạm vi đang lọc"
+          >
             <span className="text-[11px] text-sky-800 font-bold uppercase">Tổng địa bàn</span>
             <span className="text-base font-black text-sky-950 mt-0.5">{progressKPI.totalAreas}</span>
-          </div>
-          <div className="bg-emerald-50 border border-emerald-200 rounded p-2.5 flex flex-col">
+          </button>
+          <button
+            type="button"
+            onClick={() => setProgressNotice({ title: 'Địa bàn đã hoàn thành 100%', type: 'completedAreas' })}
+            className="text-left bg-emerald-50 border border-emerald-200 hover:border-emerald-400 hover:bg-emerald-100 rounded p-2.5 flex flex-col cursor-pointer transition-colors"
+            title="Bấm để xem danh sách địa bàn đã hoàn thành 100%"
+          >
             <span className="text-[11px] text-emerald-800 font-bold uppercase">Đã hoàn thành 100%</span>
             <span className="text-base font-black text-emerald-950 mt-0.5">{progressKPI.areas100Percent} địa bàn</span>
-          </div>
-          <div className="bg-teal-50 border border-teal-200 rounded p-2.5 flex flex-col">
+          </button>
+          <button
+            type="button"
+            onClick={() => setProgressNotice({ title: 'Danh sách hộ được giao', type: 'assigned' })}
+            className="text-left bg-teal-50 border border-teal-200 hover:border-teal-400 hover:bg-teal-100 rounded p-2.5 flex flex-col cursor-pointer transition-colors"
+            title="Bấm để xem danh sách hộ trong các địa bàn đang lọc"
+          >
             <span className="text-[11px] text-teal-800 font-bold uppercase">Tổng số hộ giao</span>
             <span className="text-base font-black text-teal-950 mt-0.5">{progressKPI.totalAssigned.toLocaleString()} hộ</span>
-          </div>
-          <div className="bg-emerald-50 border border-emerald-200 rounded p-2.5 flex flex-col">
+          </button>
+          <button
+            type="button"
+            onClick={() => setProgressNotice({ title: 'Danh sách hộ đã hoàn thành', type: 'completed' })}
+            className="text-left bg-emerald-50 border border-emerald-200 hover:border-emerald-400 hover:bg-emerald-100 rounded p-2.5 flex flex-col cursor-pointer transition-colors"
+            title="Bấm để xem danh sách hộ đã hoàn thành hoặc được duyệt"
+          >
             <span className="text-[11px] text-emerald-800 font-bold uppercase">Đã hoàn thành</span>
             <span className="text-base font-black text-emerald-800 mt-0.5">{progressKPI.totalDone.toLocaleString()} hộ</span>
-          </div>
-          <div className="bg-amber-50 border border-amber-200 rounded p-2.5 flex flex-col">
+          </button>
+          <button
+            type="button"
+            onClick={() => setProgressNotice({ title: 'Danh sách hộ đang nhập', type: 'inProgress' })}
+            className="text-left bg-amber-50 border border-amber-200 hover:border-amber-400 hover:bg-amber-100 rounded p-2.5 flex flex-col cursor-pointer transition-colors"
+            title="Bấm để xem danh sách hộ đang nhập"
+          >
             <span className="text-[11px] text-amber-800 font-bold uppercase">Đang nhập</span>
             <span className="text-base font-black text-amber-800 mt-0.5">{progressKPI.totalDoing.toLocaleString()} hộ</span>
-          </div>
-          <div className="bg-rose-50 border border-rose-200 rounded p-2.5 flex flex-col">
+          </button>
+          <button
+            type="button"
+            onClick={() => setProgressNotice({ title: 'Danh sách hộ chưa nhập', type: 'notEntered' })}
+            className="text-left bg-rose-50 border border-rose-200 hover:border-rose-400 hover:bg-rose-100 rounded p-2.5 flex flex-col cursor-pointer transition-colors"
+            title="Bấm để xem danh sách hộ chưa nhập"
+          >
             <span className="text-[11px] text-rose-800 font-bold uppercase">Chưa nhập</span>
             <span className="text-base font-black text-rose-800 mt-0.5">{progressKPI.totalWaiting.toLocaleString()} hộ ({progressKPI.overallRate}% xong)</span>
-          </div>
+          </button>
         </div>
       </div>
 
@@ -1051,6 +1133,162 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
               </button>
             </div>
 
+          </div>
+        </div>
+      )}
+
+      {progressNotice && (
+        <div
+          className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-3 animate-in fade-in duration-150"
+          role="dialog"
+          aria-modal="true"
+          aria-label={progressNotice.title}
+        >
+          <div className="bg-white rounded-lg border border-slate-300 shadow-2xl max-w-5xl w-full max-h-[88vh] flex flex-col text-xs overflow-hidden">
+            <div className="bg-[#058da0] text-white p-3.5 flex items-center justify-between shrink-0">
+              <div>
+                <h3 className="font-bold text-sm">{progressNotice.title}</h3>
+                <p className="text-[11px] text-teal-100 mt-0.5">
+                  {progressNotice.type === 'areas' || progressNotice.type === 'completedAreas'
+                    ? `${progressNoticeAreas.length} địa bàn trong phạm vi đang lọc`
+                    : `${progressNoticeHouseholds.length} hộ có thông tin chi tiết trên máy này`}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setProgressNotice(null)}
+                className="text-white hover:bg-[#047484] p-1.5 rounded cursor-pointer transition-colors"
+                aria-label="Đóng danh sách tiến độ"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-3.5 overflow-auto flex-1">
+              {(progressNotice.type === 'areas' || progressNotice.type === 'completedAreas') ? (
+                progressNoticeAreas.length > 0 ? (
+                  <table className="w-full text-[11px] border-collapse">
+                    <thead className="bg-slate-100 text-slate-800 font-bold sticky top-0">
+                      <tr className="text-left">
+                        <th className="p-2 border border-slate-200">TKCS / Xã</th>
+                        <th className="p-2 border border-slate-200">Địa bàn</th>
+                        <th className="p-2 border border-slate-200">ĐTV</th>
+                        <th className="p-2 border border-slate-200 text-center">Hoàn thành</th>
+                        <th className="p-2 border border-slate-200 text-center">Tiến độ</th>
+                        <th className="p-2 border border-slate-200 text-center">Thao tác</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {progressNoticeAreas.map(item => (
+                        <tr key={item.id} className="hover:bg-sky-50">
+                          <td className="p-2 border border-slate-200">
+                            {item.tkcsCode} • [{item.communeCode}] {item.communeName}
+                          </td>
+                          <td className="p-2 border border-slate-200">
+                            {item.areaName} ({item.areaCode})
+                          </td>
+                          <td className="p-2 border border-slate-200">{item.assignedSurveyorName}</td>
+                          <td className="p-2 border border-slate-200 text-center">
+                            {item.completedHouseholds}/{item.totalHouseholds}
+                          </td>
+                          <td className="p-2 border border-slate-200 text-center font-bold text-emerald-700">
+                            {item.completionRate}%
+                          </td>
+                          <td className="p-2 border border-slate-200 text-center">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setProgressNotice(null);
+                                setSelectedAreaDetail(item);
+                              }}
+                              className="px-2 py-1 bg-sky-700 hover:bg-sky-600 text-white rounded font-bold cursor-pointer"
+                            >
+                              Xem hộ
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <p className="text-center text-slate-500 py-8">Không có địa bàn phù hợp với thông báo này.</p>
+                )
+              ) : progressNoticeHouseholds.length > 0 ? (
+                <>
+                  <p className="text-[11px] text-slate-600 mb-2">
+                    Danh sách hộ lấy từ bảng kê cục bộ. Firebase chỉ lưu số đếm tiến độ, không lưu thông tin từng hộ.
+                  </p>
+                  <table className="w-full text-[11px] border-collapse">
+                    <thead className="bg-slate-100 text-slate-800 font-bold sticky top-0">
+                      <tr className="text-left">
+                        <th className="p-2 border border-slate-200">Xã</th>
+                        <th className="p-2 border border-slate-200">Địa bàn</th>
+                        <th className="p-2 border border-slate-200">STT mẫu</th>
+                        <th className="p-2 border border-slate-200">Chủ hộ</th>
+                        <th className="p-2 border border-slate-200">ĐTV</th>
+                        <th className="p-2 border border-slate-200">Trạng thái</th>
+                        <th className="p-2 border border-slate-200">Cập nhật</th>
+                        <th className="p-2 border border-slate-200 text-center">Thao tác</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {progressNoticeHouseholds.map(({ household, area }) => {
+                        const isComplete =
+                          household.surveyStatus === 'DA_HOAN_THANH' ||
+                          household.surveyStatus === 'DA_DUYET' ||
+                          household.surveyStatus === 'COMPLETED' ||
+                          household.surveyStatus === 'HOAN_THANH';
+                        const isInProgress =
+                          household.surveyStatus === 'DANG_NHAP' ||
+                          household.surveyStatus === 'IN_PROGRESS';
+                        const statusLabel = household.surveyStatus === 'DA_DUYET'
+                          ? 'Đã duyệt'
+                          : isComplete
+                            ? 'Đã hoàn thành'
+                            : isInProgress
+                              ? 'Đang nhập'
+                              : 'Chưa nhập';
+                        return (
+                          <tr key={household.id} className="hover:bg-sky-50">
+                            <td className="p-2 border border-slate-200">
+                              [{household.communeCode}] {household.communeName}
+                            </td>
+                            <td className="p-2 border border-slate-200">
+                              {area.areaName} ({area.areaCode})
+                            </td>
+                            <td className="p-2 border border-slate-200 text-center">{household.sttMau}</td>
+                            <td className="p-2 border border-slate-200 font-semibold">{household.householdHead}</td>
+                            <td className="p-2 border border-slate-200">{household.assignedSurveyorName || area.assignedSurveyorName}</td>
+                            <td className="p-2 border border-slate-200">{statusLabel}</td>
+                            <td className="p-2 border border-slate-200">
+                              {household.updatedAt ? new Date(household.updatedAt).toLocaleString('vi-VN') : '—'}
+                            </td>
+                            <td className="p-2 border border-slate-200 text-center">
+                              {onOpenHouseholdForm && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setProgressNotice(null);
+                                    onOpenHouseholdForm(household);
+                                  }}
+                                  className="px-2 py-1 bg-sky-700 hover:bg-sky-600 text-white rounded font-bold cursor-pointer"
+                                >
+                                  Mở phiếu
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </>
+              ) : (
+                <p className="text-center text-slate-500 py-8">
+                  Không có hộ chi tiết cục bộ phù hợp. Nếu tiến độ đến từ Firebase, hãy nạp file kết quả ĐTV trên máy Admin để có danh sách từng hộ.
+                </p>
+              )}
+            </div>
           </div>
         </div>
       )}
