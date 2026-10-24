@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import * as XLSX from 'xlsx';
 import { 
   FileSpreadsheet, Upload, Download, Printer, Plus, PlusCircle, Trash2, Edit3, 
@@ -52,6 +52,7 @@ import {
   getAreaProgressKey,
   parseSurveyWorkPackage,
   normalizeSurveyorName,
+  selectOfficialHouseholds,
   SurveyWorkPackage,
   isAreaAssigned
 } from './utils/areaDataTransfer';
@@ -2709,10 +2710,103 @@ export default function App() {
     return false;
   };
 
+  // Bộ nhớ "lần ghi thành công gần nhất" của từng địa bàn: số đếm không đổi thì không ghi lại lên Firebase
+  const progressSyncCacheRef = useRef<Map<string, string>>(new Map());
+  const progressSyncSignature = (snapshot: AreaProgressSnapshot) => [
+    snapshot.surveyorId, snapshot.surveyorName, snapshot.areaName,
+    snapshot.totalHouseholds, snapshot.completedHouseholds, snapshot.inProgressHouseholds
+  ].join('|');
+
+  // Admin/Giám sát đổi trạng thái hộ (xóa trắng, duyệt, hàng loạt, thay thế hộ, lưu phiếu) → ghi lại số đếm
+  // của các địa bàn bị ảnh hưởng. ĐTV không dùng hàm này vì đã có cơ chế tự đồng bộ ở trên.
+  const syncAreaProgressForHouseholds = (nextHouseholds: Household[], changedHouseholds: Household[]) => {
+    if (currentUser.role === 'SURVEYOR' || changedHouseholds.length === 0) return;
+    try {
+      const communesById = new Map(communes.map(commune => [commune.id, commune]));
+      const communesByCode = new Map(communes.map(commune => [commune.communeCode, commune]));
+      const keyOf = (household: Household) => {
+        const commune = communesById.get(household.communeId) || communesByCode.get(household.communeCode);
+        return getAreaProgressKey(commune?.communeCode || household.communeCode, household.areaCode);
+      };
+      const affectedKeys = new Set<string>();
+      changedHouseholds.forEach(household => {
+        const key = keyOf(household);
+        if (key) affectedKeys.add(key);
+      });
+      if (affectedKeys.size === 0) return;
+
+      const householdsByAreaKey = new Map<string, Household[]>();
+      nextHouseholds.forEach(household => {
+        const key = keyOf(household);
+        if (!key || !affectedKeys.has(key)) return;
+        const list = householdsByAreaKey.get(key) || [];
+        list.push(household);
+        householdsByAreaKey.set(key, list);
+      });
+
+      const snapshots: AreaProgressSnapshot[] = [];
+      const doneKeys = new Set<string>();
+      areas.forEach(area => {
+        const commune = communesById.get(area.communeId) || communesByCode.get(area.communeCode || '');
+        if (!commune) return;
+        const key = getAreaProgressKey(commune.communeCode, area.code);
+        if (!affectedKeys.has(key) || doneKeys.has(key)) return;
+        const areaHouseholds = householdsByAreaKey.get(key) || [];
+        // ĐTV phụ trách = người được gán nhiều nhất trong 10 hộ chính thức
+        const owners = new Map<string, { id: string; name: string; count: number }>();
+        selectOfficialHouseholds(areaHouseholds).forEach(household => {
+          if (!household.assignedSurveyorId) return;
+          const owner = owners.get(household.assignedSurveyorId) || {
+            id: household.assignedSurveyorId,
+            name: household.assignedSurveyorName || '',
+            count: 0
+          };
+          owner.count++;
+          owners.set(owner.id, owner);
+        });
+        const owner = Array.from(owners.values()).sort((a, b) => b.count - a.count)[0];
+        if (!owner) return; // chưa giao cho ĐTV nào thì không có gì để ghi
+        const snapshot = createAreaProgressSnapshot(
+          owner.id,
+          owner.name,
+          area,
+          commune,
+          areaHouseholds.filter(household =>
+            household.assignedSurveyorId
+              ? household.assignedSurveyorId === owner.id
+              : !household.assignedSurveyorName || household.assignedSurveyorName === owner.name
+          )
+        );
+        if (snapshot.totalHouseholds === 0) return;
+        // Số đếm không đổi so với bản ghi đã biết (ví dụ chỉ Duyệt & Khóa: vẫn là "hoàn thành") → không ghi,
+        // để mốc "hoàn thành lúc" trên Firebase không bị làm mới oan.
+        const knownSnapshot = cloudProgress.find(item => item.id === snapshot.id);
+        if (knownSnapshot && progressSyncSignature(knownSnapshot) === progressSyncSignature(snapshot)) return;
+        doneKeys.add(key);
+        snapshots.push(snapshot);
+      });
+
+      Promise.all(snapshots.map(snapshot =>
+        setDoc(doc(db, 'areaProgress', snapshot.id), snapshot).then(() => {
+          progressSyncCacheRef.current.set(snapshot.id, progressSyncSignature(snapshot));
+        })
+      )).catch(err => {
+        console.error('Không thể đồng bộ số đếm tiến độ lên Firebase:', err);
+        setNotification({
+          type: 'error',
+          message: 'Đã đổi trạng thái hộ trên máy này nhưng chưa ghi được tiến độ lên Firebase. Màn Tiến độ trên máy khác có thể chưa cập nhật.'
+        });
+      });
+    } catch (err) {
+      console.error('Lỗi chuẩn bị đồng bộ tiến độ:', err);
+    }
+  };
+
   useEffect(() => {
     if (currentUser.role !== 'SURVEYOR' || !isLoggedIn) return;
 
-    const syncProgress = () => {
+    const syncProgress = (force = false) => {
+      if (force) progressSyncCacheRef.current.clear();
       const communesById = new Map(communes.map(commune => [commune.id, commune]));
       const communesByCode = new Map(communes.map(commune => [commune.communeCode, commune]));
       const householdsByAreaKey = new Map<string, Household[]>();
@@ -2745,24 +2839,33 @@ export default function App() {
           commune,
           assignedHouseholds
         )];
-      });
+      })
+        // Không ghi bản rỗng (ví dụ lúc dữ liệu máy chưa tải xong) kẻo đè mất số đếm đúng trên Firebase
+        .filter(snapshot => snapshot.totalHouseholds > 0)
+        // Số đếm không đổi so với lần ghi thành công trước → bỏ qua, tiết kiệm hạn mức Firebase
+        .filter(snapshot => progressSyncCacheRef.current.get(snapshot.id) !== progressSyncSignature(snapshot));
+
+      if (snapshots.length === 0) return;
 
       Promise.all(snapshots.map(snapshot =>
-        setDoc(doc(db, 'areaProgress', snapshot.id), snapshot)
+        setDoc(doc(db, 'areaProgress', snapshot.id), snapshot).then(() => {
+          progressSyncCacheRef.current.set(snapshot.id, progressSyncSignature(snapshot));
+        })
       )).catch(err => {
         console.error('Không thể đồng bộ số đếm tiến độ lên Firebase:', err);
         setNotification({
           type: 'error',
-          message: 'Không đồng bộ được tiến độ lên Firebase. Phiếu vẫn được lưu trên máy này.'
+          message: 'Không đồng bộ được tiến độ lên Firebase (mất mạng hoặc hết hạn mức). Phiếu vẫn được lưu trên máy này; app sẽ tự ghi lại khi có mạng.'
         });
       });
     };
 
-    const timer = window.setTimeout(syncProgress, 400);
-    window.addEventListener('online', syncProgress);
+    const handleOnline = () => syncProgress(true);
+    const timer = window.setTimeout(() => syncProgress(), 400);
+    window.addEventListener('online', handleOnline);
     return () => {
       window.clearTimeout(timer);
-      window.removeEventListener('online', syncProgress);
+      window.removeEventListener('online', handleOnline);
     };
   }, [areas, communes, households, currentUser, isLoggedIn]);
 
@@ -3132,6 +3235,10 @@ export default function App() {
       try { localStorage.setItem('cached_households', JSON.stringify(next)); } catch (e) {}
       return next;
     });
+    syncAreaProgressForHouseholds(
+      households.map(h => h.id === updatedHousehold.id ? updatedHousehold : h),
+      [updatedHousehold]
+    );
     setActiveHouseholdForm(null);
     showNotification('success', `Đã lưu phiếu Phụ lục II của hộ "${updatedHousehold.householdHead}" thành công.`);
   };
@@ -4349,6 +4456,10 @@ export default function App() {
 
     setHouseholds(updatedHouseholds);
     try { localStorage.setItem('cached_households', JSON.stringify(updatedHouseholds)); } catch (e) {}
+    syncAreaProgressForHouseholds(
+      updatedHouseholds,
+      updatedHouseholds.filter(h => selectedHouseholdIds.includes(h.id))
+    );
     setSelectedHouseholdIds([]);
     showNotification('success', `Đã chuyển trạng thái ${count} hộ sang: ${SURVEY_STATUS_LABELS[status].label}`);
   };
@@ -4398,6 +4509,10 @@ export default function App() {
 
     setHouseholdToReplace(null);
 
+    syncAreaProgressForHouseholds(
+      households.map(h => h.id === original.id ? updatedOriginal : h.id === replacement.id ? updatedReplacement : h),
+      [updatedOriginal, updatedReplacement]
+    );
     showNotification('success', `Đã thay thế thành công hộ mẫu "${original.householdHead}" bằng hộ dự phòng "${replacement.householdHead}" của địa bàn [${original.areaCode}].`);
   };
 
@@ -4881,6 +4996,10 @@ export default function App() {
       try { localStorage.setItem('cached_households', JSON.stringify(next)); } catch (e) {}
       return next;
     });
+    syncAreaProgressForHouseholds(
+      households.map(item => item.id === targetH.id ? updatedH : item),
+      [updatedH]
+    );
     showNotification('success', `Đã xóa trắng thành công phiếu của hộ "${targetH.householdHead}".`);
   };
 
@@ -4969,6 +5088,10 @@ export default function App() {
 
     setHouseholds(updatedHouseholds);
     try { localStorage.setItem('cached_households', JSON.stringify(updatedHouseholds)); } catch (e) {}
+    syncAreaProgressForHouseholds(
+      updatedHouseholds,
+      updatedHouseholds.filter(h => targetIds.includes(h.id))
+    );
     setSelectedHouseholdIds([]);
     setIsResetQuestionnaireModalOpen(false);
     setIsResettingQuestionnaire(false);
@@ -5647,6 +5770,10 @@ export default function App() {
                                   try { localStorage.setItem('cached_households', JSON.stringify(next)); } catch (e) {}
                                   return next;
                                 });
+                                syncAreaProgressForHouseholds(
+                                  households.map(item => item.id === h.id ? updatedH : item),
+                                  [updatedH]
+                                );
                                 showNotification('success', `Đã ${nextStatus === 'DA_DUYET' ? 'Duyệt & Khóa' : 'Mở khóa'} phiếu hộ ${h.householdHead}`);
                               }}
                               className={`p-1.5 rounded border cursor-pointer hover:scale-105 transition-all ${
@@ -8807,6 +8934,10 @@ export default function App() {
                     try { localStorage.setItem('cached_households', JSON.stringify(updatedHouseholds)); } catch (e) {}
                     setSelectedHouseholdIds([]);
                     setIsDuyetDiaBanModalOpen(false);
+                    syncAreaProgressForHouseholds(
+                      updatedHouseholds,
+                      updatedHouseholds.filter(h => targetIds.has(h.id))
+                    );
                     showNotification('success', `Đã Duyệt & Khóa thành công toàn bộ ${count} hộ của địa bàn!`);
                   }}
                   className="w-full py-2.5 bg-purple-700 hover:bg-purple-600 active:bg-purple-800 text-white rounded font-extrabold flex items-center justify-center gap-2 cursor-pointer shadow-xs transition-colors"
