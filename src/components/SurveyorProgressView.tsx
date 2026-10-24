@@ -6,7 +6,7 @@
 import React, { useState, useMemo } from 'react';
 import type { Commune, Household, SurveyArea } from '../App';
 import type { Surveyor } from '../types/user';
-import { isOfficialSurveyHousehold, type AreaProgressSnapshot } from '../utils/areaDataTransfer';
+import { getAreaProgressKey, isOfficialSurveyHousehold, type AreaProgressSnapshot } from '../utils/areaDataTransfer';
 import { 
   Users, CheckCircle2, Clock, AlertCircle, Search, 
   FileSpreadsheet, FileText, Filter, Eye, ChevronRight, MapPin, 
@@ -188,6 +188,12 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
       effectiveAreas = Array.from(areaMap.values());
     }
 
+    const communeMap = new Map<string, Commune>();
+    communes.forEach(c => {
+      if (c.id) communeMap.set(c.id, c);
+      if (c.communeCode) communeMap.set(c.communeCode, c);
+    });
+
     // Phân quyền: Điều tra viên chỉ thấy địa bàn mình phụ trách, Giám sát viên thấy địa bàn xã phụ trách
     if (currentUser && currentUser.role !== 'ADMIN') {
       if (currentUser.role === 'SURVEYOR') {
@@ -196,17 +202,17 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
           const myDirectHhAreaIds = new Set(
             households
               .filter(h => h.assignedSurveyorId === currentUser.id || (h.assignedSurveyorName && h.assignedSurveyorName === currentUser.name))
-              .map(h => h.areaId || h.areaCode)
+              .map(h => {
+                const commune = communeMap.get(h.communeId) || communeMap.get(h.communeCode);
+                return getAreaProgressKey(commune?.communeCode || h.communeCode, h.areaCode);
+              })
           );
 
-          effectiveAreas = effectiveAreas.filter(a => 
-            myAssigned.has(a.id) || 
-            myAssigned.has(a.code) || 
-            myAssigned.has(`${a.communeId}_${a.code}`) ||
-            (a.communeCode && myAssigned.has(`${a.communeCode}_${a.code}`)) ||
-            myDirectHhAreaIds.has(a.id) ||
-            myDirectHhAreaIds.has(a.code)
-          );
+          effectiveAreas = effectiveAreas.filter(a => {
+            const commune = communeMap.get(a.communeId) || communeMap.get((a as any).communeCode);
+            const areaKey = getAreaProgressKey(commune?.communeCode || a.communeCode, a.code);
+            return myAssigned.has(a.id) || myAssigned.has(areaKey) || myDirectHhAreaIds.has(areaKey);
+          });
         }
       } else if (currentUser.role === 'SUPERVISOR') {
         if (currentUser.assignedCommunes && !currentUser.assignedCommunes.includes('ALL') && currentUser.assignedCommunes.length > 0) {
@@ -218,63 +224,69 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
       }
     }
 
-    const communeMap = new Map<string, Commune>();
-    communes.forEach(c => {
-      if (c.id) communeMap.set(c.id, c);
-      if (c.communeCode) communeMap.set(c.communeCode, c);
-    });
-
     const uniqueAreas = new Map<string, SurveyArea>();
     effectiveAreas.forEach(area => {
       const commune = communeMap.get(area.communeId) || communeMap.get((area as any).communeCode);
-      const communeCode = (commune?.communeCode || area.communeCode || '').trim();
-      const areaCode = area.code.trim();
-      const key = communeCode && areaCode
-        ? `${communeCode}_${areaCode}`
-        : area.id;
+      const key = getAreaProgressKey(commune?.communeCode || area.communeCode, area.code) || area.id;
       if (!uniqueAreas.has(key)) uniqueAreas.set(key, area);
     });
     effectiveAreas = Array.from(uniqueAreas.values());
 
-    // Pre-index households and communes for O(1) lightning fast lookups
+    // Pre-index households, surveyor assignments, and cloud snapshots by canonical area ID.
     const hhByAreaId = new Map<string, Household[]>();
-    const hhByCommuneAndAreaCode = new Map<string, Household[]>();
+    const hhByAreaKey = new Map<string, Household[]>();
+    const surveyorNamesByAreaKey = new Map<string, Set<string>>();
+    const cloudProgressByAreaKey = new Map<string, AreaProgressSnapshot[]>();
+    const cloudProgressByAreaId = new Map<string, AreaProgressSnapshot[]>();
 
     households.forEach(h => {
       if (h.areaId) {
         if (!hhByAreaId.has(h.areaId)) hhByAreaId.set(h.areaId, []);
         hhByAreaId.get(h.areaId)!.push(h);
       }
-      if (h.areaCode) {
-        const householdCommune = communeMap.get(h.communeId) || communeMap.get(h.communeCode || '');
-        const communeCode = (householdCommune?.communeCode || h.communeCode || h.communeId || 'default').trim();
-        const cKey = `${communeCode}_${h.areaCode.trim()}`;
-        if (!hhByCommuneAndAreaCode.has(cKey)) hhByCommuneAndAreaCode.set(cKey, []);
-        hhByCommuneAndAreaCode.get(cKey)!.push(h);
+      const householdCommune = communeMap.get(h.communeId) || communeMap.get(h.communeCode || '');
+      const areaKey = getAreaProgressKey(householdCommune?.communeCode || h.communeCode, h.areaCode);
+      if (areaKey) {
+        if (!hhByAreaKey.has(areaKey)) hhByAreaKey.set(areaKey, []);
+        hhByAreaKey.get(areaKey)!.push(h);
       }
+    });
+
+    surveyors.forEach(surveyor => {
+      if (surveyor.role !== 'SURVEYOR') return;
+      (surveyor.assignedAreas || []).forEach(assignedKey => {
+        if (assignedKey.includes('_')) {
+          const assignedNames = surveyorNamesByAreaKey.get(assignedKey) || new Set<string>();
+          assignedNames.add(surveyor.name);
+          surveyorNamesByAreaKey.set(assignedKey, assignedNames);
+        }
+      });
+    });
+
+    cloudProgress.forEach(snapshot => {
+      const areaKey = getAreaProgressKey(snapshot.communeCode, snapshot.areaCode);
+      const target = areaKey ? cloudProgressByAreaKey : cloudProgressByAreaId;
+      const key = areaKey || snapshot.areaId;
+      const snapshots = target.get(key) || [];
+      snapshots.push(snapshot);
+      target.set(key, snapshots);
     });
 
     return effectiveAreas.map(area => {
       const commune = communeMap.get(area.communeId) || communeMap.get((area as any).communeCode);
-      const communeCode = (commune?.communeCode || area.communeCode || '').trim();
-      const areaCode = area.code.trim();
+      const communeCode = commune?.communeCode || area.communeCode || '';
+      const areaKey = getAreaProgressKey(communeCode, area.code);
       
-      const cKey = `${communeCode || area.communeId || 'default'}_${areaCode}`;
-      let allAreaHHs = hhByCommuneAndAreaCode.get(cKey) || [];
-
-      if (allAreaHHs.length === 0 && !communeCode) {
-        allAreaHHs = hhByAreaId.get(area.id) || [];
-      }
-      if (allAreaHHs.length === 0 && !communeCode) {
-        allAreaHHs = households.filter(h => {
-          return h.areaId === area.id && h.areaCode === area.code;
-        });
-      }
+      const allAreaHHs = areaKey
+        ? hhByAreaKey.get(areaKey) || []
+        : hhByAreaId.get(area.id) || [];
 
       // A missing official roster must not turn reserve households into progress.
-      const officialHHs = Array.from(
-        new Map(allAreaHHs.filter(isOfficialSurveyHousehold).map(h => [h.id, h])).values()
-      ).slice(0, 10);
+      const officialHHs = Array.from(new Map(
+        allAreaHHs
+          .filter(isOfficialSurveyHousehold)
+          .map(h => [h.sttMau?.trim() || h.id, h])
+      ).values()).slice(0, 10);
       const assignedHHs = officialHHs;
 
       const localTotalHouseholds = assignedHHs.length;
@@ -293,27 +305,12 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
       assignedHHs.forEach(h => {
         if (h.assignedSurveyorName) surveyorSet.add(h.assignedSurveyorName);
       });
-      surveyors.forEach(s => {
-        if (s.role === 'SURVEYOR' && s.assignedAreas && !s.assignedAreas.includes('ALL')) {
-          if (
-            s.assignedAreas.includes(area.id) || 
-            s.assignedAreas.includes(area.code) || 
-            s.assignedAreas.includes(`${area.communeId}_${area.code}`) ||
-            (communeCode && s.assignedAreas.includes(`${communeCode}_${area.code}`))
-          ) {
-            surveyorSet.add(s.name);
-          }
-        }
-      });
+      (surveyorNamesByAreaKey.get(areaKey) || []).forEach(name => surveyorSet.add(name));
 
       const remoteProgressBySurveyor = new Map<string, AreaProgressSnapshot>();
-      cloudProgress
-        .filter(item => {
-          if (communeCode && item.communeCode && item.areaCode) {
-            return item.communeCode.trim() === communeCode && item.areaCode.trim() === areaCode;
-          }
-          return item.areaId === area.id;
-        })
+      (areaKey
+        ? cloudProgressByAreaKey.get(areaKey) || []
+        : cloudProgressByAreaId.get(area.id) || [])
         .forEach(item => {
           const key = item.surveyorId || item.surveyorName || item.id;
           const existing = remoteProgressBySurveyor.get(key);
@@ -329,7 +326,10 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
         });
       const remoteProgress = Array.from(remoteProgressBySurveyor.values());
       remoteProgress.forEach(item => surveyorSet.add(item.surveyorName));
-      const remoteTotalHouseholds = Math.min(10, Math.max(0, ...remoteProgress.map(item => item.totalHouseholds)));
+      const remoteTotalHouseholds = Math.min(10, remoteProgress.reduce(
+        (total, item) => total + item.totalHouseholds,
+        0
+      ));
       const totalHouseholds = allAreaHHs.length > 0
         ? localTotalHouseholds
         : remoteTotalHouseholds;

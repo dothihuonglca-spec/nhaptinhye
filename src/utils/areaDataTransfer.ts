@@ -82,6 +82,14 @@ export interface AreaProgressSnapshot {
   updatedAt: string;
 }
 
+export function getAreaProgressKey(communeCode: string | undefined, areaCode: string | undefined): string {
+  const normalizedCommuneCode = communeCode?.trim() || '';
+  const normalizedAreaCode = areaCode?.trim() || '';
+  return normalizedCommuneCode && normalizedAreaCode
+    ? `${normalizedCommuneCode}_${normalizedAreaCode}`
+    : '';
+}
+
 export function isOfficialSurveyHousehold(household: Pick<Household, 'sampleStatus' | 'sttMau'>): boolean {
   const status = (household.sampleStatus || '').normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -303,13 +311,11 @@ export function createAreaProgressSnapshot(
 ): AreaProgressSnapshot {
   const areaCode = area.code.trim();
   const communeCode = (commune.communeCode || commune.id).trim();
+  const areaProgressKey = getAreaProgressKey(communeCode, areaCode);
   const areaHouseholds = households
     .filter(h => {
-      if (h.areaCode.trim() !== areaCode) return false;
-      if (h.communeCode && commune.communeCode) {
-        return h.communeCode.trim() === communeCode;
-      }
-      return h.communeId === commune.id;
+      const householdCommuneCode = h.communeCode?.trim() || (h.communeId === commune.id ? communeCode : '');
+      return getAreaProgressKey(householdCommuneCode, h.areaCode) === areaProgressKey;
     })
     .filter(isOfficialSurveyHousehold)
     .slice(0, 10);
@@ -321,7 +327,7 @@ export function createAreaProgressSnapshot(
   ).length;
 
   return {
-    id: `${encodeURIComponent(surveyorId)}_${encodeURIComponent(`${communeCode}_${areaCode}`)}`,
+    id: `${encodeURIComponent(surveyorId)}_${encodeURIComponent(areaProgressKey)}`,
     surveyorId,
     surveyorName,
     areaId: area.id,

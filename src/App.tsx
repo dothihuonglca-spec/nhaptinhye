@@ -49,6 +49,7 @@ import {
 import {
   AreaProgressSnapshot,
   createAreaProgressSnapshot,
+  getAreaProgressKey,
   parseSurveyWorkPackage,
   normalizeSurveyorName,
   SurveyWorkPackage,
@@ -2712,41 +2713,39 @@ export default function App() {
     if (currentUser.role !== 'SURVEYOR' || !isLoggedIn) return;
 
     const syncProgress = () => {
-      const assignedAreas = areas.filter(area =>
-        isAreaAssigned(area, currentUser.assignedAreas || []) ||
-        households.some(h =>
-          h.assignedSurveyorId === currentUser.id &&
-          (h.areaId === area.id ||
-            (h.areaCode === area.code && (
-              h.communeId === area.communeId ||
-              h.communeCode === area.communeCode
-            )))
-        )
-      );
-      const snapshots = assignedAreas.map(area => {
-        const commune = communes.find(c =>
-          c.id === area.communeId || c.communeCode === area.communeCode
-        );
-        if (!commune) return null;
-        const assignedHouseholds = households.filter(h =>
-          h.areaId === area.id ||
-          (h.areaCode === area.code && (
-            h.communeId === area.communeId ||
-            h.communeCode === commune.communeCode
-          ))
-        ).filter(h =>
+      const communesById = new Map(communes.map(commune => [commune.id, commune]));
+      const communesByCode = new Map(communes.map(commune => [commune.communeCode, commune]));
+      const householdsByAreaKey = new Map<string, Household[]>();
+      households.forEach(household => {
+        const commune = communesById.get(household.communeId) || communesByCode.get(household.communeCode);
+        const areaKey = getAreaProgressKey(commune?.communeCode || household.communeCode, household.areaCode);
+        if (!areaKey) return;
+        const areaHouseholds = householdsByAreaKey.get(areaKey) || [];
+        areaHouseholds.push(household);
+        householdsByAreaKey.set(areaKey, areaHouseholds);
+      });
+      const snapshots = areas.flatMap(area => {
+        const commune = communesById.get(area.communeId) || communesByCode.get(area.communeCode || '');
+        if (!commune) return [];
+        const areaKey = getAreaProgressKey(commune.communeCode, area.code);
+        const areaHouseholds = householdsByAreaKey.get(areaKey) || [];
+        if (
+          !isAreaAssigned(area, currentUser.assignedAreas || []) &&
+          !areaHouseholds.some(h => h.assignedSurveyorId === currentUser.id)
+        ) return [];
+        const assignedHouseholds = areaHouseholds.filter(h =>
           h.assignedSurveyorId
             ? h.assignedSurveyorId === currentUser.id
             : !h.assignedSurveyorName || h.assignedSurveyorName === currentUser.name
         );
-        return createAreaProgressSnapshot(
+        return [createAreaProgressSnapshot(
           currentUser.id,
           currentUser.name,
           area,
           commune,
           assignedHouseholds
-        );
-      }).filter((item): item is AreaProgressSnapshot => item !== null);
+        )];
+      });
 
       Promise.all(snapshots.map(snapshot =>
         setDoc(doc(db, 'areaProgress', snapshot.id), snapshot)
@@ -3613,7 +3612,12 @@ export default function App() {
       const key = householdCompositeKey(household);
       if (!householdIndexByCompositeKey.has(key)) householdIndexByCompositeKey.set(key, index);
     });
-    const processedAreas: { area: SurveyArea; commune: Commune; surveyorId: string; surveyorName: string }[] = [];
+    const processedAreas = new Map<string, {
+      area: SurveyArea;
+      commune: Commune;
+      surveyorId: string;
+      surveyorName: string;
+    }>();
     let updatedCount = 0;
     let skippedIncompleteCount = 0;
     const userDepartment = departments.find(department =>
@@ -3752,7 +3756,8 @@ export default function App() {
         updatedEntryCount++;
       }
       if (updatedEntryCount > 0) {
-        processedAreas.push({
+        const areaKey = getAreaProgressKey(localCommune.communeCode, localArea.code);
+        processedAreas.set(`${resolvedSurveyorId}:${areaKey}`, {
           area: localArea,
           commune: localCommune,
           surveyorId: resolvedSurveyorId,
@@ -3764,28 +3769,23 @@ export default function App() {
     setHouseholds(nextHouseholds);
     let progressSynced = true;
     try {
+      const communesById = new Map(communes.map(commune => [commune.id, commune]));
+      const communesByCode = new Map(communes.map(commune => [commune.communeCode, commune]));
       const householdsByArea = new Map<string, Household[]>();
       nextHouseholds.forEach(household => {
-        const keys = new Set([
-          household.areaId,
-          `${household.communeId}_${household.areaCode}`,
-          `${household.communeCode}_${household.areaCode}`
-        ].filter(Boolean));
-        keys.forEach(key => {
-          const areaHouseholds = householdsByArea.get(key) || [];
-          areaHouseholds.push(household);
-          householdsByArea.set(key, areaHouseholds);
-        });
+        const commune = communesById.get(household.communeId) || communesByCode.get(household.communeCode);
+        const areaKey = getAreaProgressKey(commune?.communeCode || household.communeCode, household.areaCode);
+        if (!areaKey) return;
+        const areaHouseholds = householdsByArea.get(areaKey) || [];
+        areaHouseholds.push(household);
+        householdsByArea.set(areaKey, areaHouseholds);
       });
-      const snapshots = processedAreas.map(item => createAreaProgressSnapshot(
+      const snapshots = Array.from(processedAreas.values()).map(item => createAreaProgressSnapshot(
         item.surveyorId,
         item.surveyorName,
         item.area,
         item.commune,
-        (householdsByArea.get(item.area.id) ||
-          householdsByArea.get(`${item.commune.id}_${item.area.code}`) ||
-          householdsByArea.get(`${item.commune.communeCode}_${item.area.code}`) ||
-          []).filter(h =>
+        (householdsByArea.get(getAreaProgressKey(item.commune.communeCode, item.area.code)) || []).filter(h =>
           h.assignedSurveyorId
             ? h.assignedSurveyorId === item.surveyorId
             : !h.assignedSurveyorName || h.assignedSurveyorName === item.surveyorName
@@ -3801,7 +3801,9 @@ export default function App() {
     return {
       updatedCount,
       newCount: 0,
-      areaCount: processedAreas.length,
+      areaCount: new Set(Array.from(processedAreas.values(), item =>
+        getAreaProgressKey(item.commune.communeCode, item.area.code)
+      )).size,
       progressSynced,
       skippedCount: skippedIncompleteCount
     };
@@ -3815,6 +3817,14 @@ export default function App() {
     const nextHouseholds = [...households];
     const householdIndexById = new Map(nextHouseholds.map((household, index) => [household.id, index]));
     const areasById = new Map(areas.map(area => [area.id, area]));
+    const communesById = new Map(communes.map(commune => [commune.id, commune]));
+    const communesByCode = new Map(communes.map(commune => [commune.communeCode, commune]));
+    const areasByProgressKey = new Map<string, SurveyArea>();
+    areas.forEach(area => {
+      const commune = communesById.get(area.communeId) || communesByCode.get(area.communeCode || '');
+      const areaKey = getAreaProgressKey(commune?.communeCode || area.communeCode, area.code);
+      if (areaKey && !areasByProgressKey.has(areaKey)) areasByProgressKey.set(areaKey, area);
+    });
     const householdIndexesByLocation = new Map<string, number[]>();
     const normalizeSampleNumber = (value: string) =>
       /^\d+$/.test(value.trim()) ? String(Number(value.trim())) : value.trim().toUpperCase();
@@ -3867,16 +3877,14 @@ export default function App() {
         continue;
       }
 
-      let householdIndex = entry.id ? householdIndexById.get(entry.id) : undefined;
+      let householdIndex: number | undefined;
       if ((entry.areaCode || entry.areaKey) && entry.sttMau) {
         const communeCode = entry.communeCode?.trim() || '';
         const areaCode = entry.areaCode?.trim() || '';
         const sampleNumber = normalizeSampleNumber(entry.sttMau);
         const locationKeys = [
           communeCode && areaCode ? `${communeCode}_${areaCode}_${sampleNumber}` : '',
-          entry.communeId && areaCode ? `${entry.communeId}_${areaCode}_${sampleNumber}` : '',
-          entry.areaId && sampleNumber ? `${entry.areaId}_${sampleNumber}` : '',
-          entry.areaKey ? `areaKey:${entry.areaKey.trim()}_${sampleNumber}` : ''
+          entry.areaKey && sampleNumber ? `areaKey:${entry.areaKey.trim()}_${sampleNumber}` : ''
         ].filter(Boolean);
         const matchingIndexes = Array.from(new Set(locationKeys.flatMap(key =>
           householdIndexesByLocation.get(key) || []
@@ -3888,25 +3896,24 @@ export default function App() {
           continue;
         }
       }
+      if (householdIndex === undefined && entry.id) {
+        householdIndex = householdIndexById.get(entry.id);
+      }
       if (householdIndex === undefined) {
         unmatchedCount++;
         continue;
       }
       const existing = nextHouseholds[householdIndex];
-      const area = areasById.get(existing.areaId) ||
-        areas.find(item =>
-          item.code === existing.areaCode &&
-          (item.communeId === existing.communeId || item.communeCode === existing.communeCode)
-        );
-      const commune = communes.find(item =>
-        item.id === existing.communeId || item.communeCode === existing.communeCode
-      );
+      const commune = communesById.get(existing.communeId) || communesByCode.get(existing.communeCode);
+      const existingAreaKey = getAreaProgressKey(commune?.communeCode || existing.communeCode, existing.areaCode);
+      const area = (existingAreaKey ? areasByProgressKey.get(existingAreaKey) : undefined) ||
+        (!existingAreaKey ? areasById.get(existing.areaId) : undefined);
       if (!area || !commune) {
         throw new Error(`Không xác định được địa bàn của hộ ${existing.sttMau || existing.id}; chưa nhập dữ liệu nào.`);
       }
       const locationMismatch =
         (entry.areaCode && entry.areaCode.trim() !== existing.areaCode.trim()) ||
-        (entry.communeCode && entry.communeCode.trim() !== existing.communeCode.trim()) ||
+        (entry.communeCode && entry.communeCode.trim() !== (commune.communeCode || '').trim()) ||
         (entry.sttMau && normalizeSampleNumber(entry.sttMau) !== normalizeSampleNumber(existing.sttMau || ''));
       if (locationMismatch) {
         throw new Error(`Mã xã/địa bàn/số thứ tự trong file không khớp hộ ${existing.sttMau || existing.id}; chưa nhập dữ liệu nào.`);
@@ -3980,7 +3987,8 @@ export default function App() {
         updatedBy: entry.updatedBy || resolvedSurveyor?.name || existing.updatedBy || ''
       };
       if (resolvedSurveyor) {
-        processedAreas.set(`${resolvedSurveyor.id}:${area.id}`, { area, commune, surveyor: resolvedSurveyor });
+        const areaKey = getAreaProgressKey(commune.communeCode, area.code);
+        processedAreas.set(`${resolvedSurveyor.id}:${areaKey}`, { area, commune, surveyor: resolvedSurveyor });
       }
       updatedCount++;
     }
@@ -3996,16 +4004,22 @@ export default function App() {
 
     await saveLocalDataSnapshot({ communes, areas, households: nextHouseholds, surveyors, departments });
     setHouseholds(nextHouseholds);
+    const householdsByAreaKey = new Map<string, Household[]>();
+    nextHouseholds.forEach(household => {
+      const householdCommune = communesById.get(household.communeId) || communesByCode.get(household.communeCode);
+      const areaKey = getAreaProgressKey(householdCommune?.communeCode || household.communeCode, household.areaCode);
+      if (!areaKey) return;
+      const areaHouseholds = householdsByAreaKey.get(areaKey) || [];
+      areaHouseholds.push(household);
+      householdsByAreaKey.set(areaKey, areaHouseholds);
+    });
     const snapshots = Array.from(processedAreas.values()).map(({ area, commune, surveyor }) =>
       createAreaProgressSnapshot(
         surveyor.id,
         surveyor.name,
         area,
         commune,
-        nextHouseholds.filter(household =>
-          (household.areaId === area.id ||
-            (household.areaCode === area.code &&
-              (household.communeId === commune.id || household.communeCode === commune.communeCode))) &&
+        (householdsByAreaKey.get(getAreaProgressKey(commune.communeCode, area.code)) || []).filter(household =>
           (household.assignedSurveyorId
             ? household.assignedSurveyorId === surveyor.id
             : normalizeSurveyorName(household.assignedSurveyorName || '') === normalizeSurveyorName(surveyor.name))
@@ -4025,7 +4039,9 @@ export default function App() {
     return {
       updatedCount,
       newCount: 0,
-      areaCount: processedAreas.size,
+      areaCount: new Set(Array.from(processedAreas.values(), item =>
+        getAreaProgressKey(item.commune.communeCode, item.area.code)
+      )).size,
       progressSynced,
       skippedCount: incompleteCount + unmatchedCount + ambiguousCount + staleCount
     };
