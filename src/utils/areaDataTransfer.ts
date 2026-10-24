@@ -109,6 +109,77 @@ export function isOfficialSurveyHousehold(household: Pick<Household, 'sampleStat
   return true;
 }
 
+/** Số hộ chính thức chuẩn của mỗi địa bàn. */
+export const OFFICIAL_HOUSEHOLDS_PER_AREA = 10;
+
+const COMPLETED_SURVEY_STATUSES = ['DA_HOAN_THANH', 'DA_DUYET', 'COMPLETED', 'HOAN_THANH'];
+const IN_PROGRESS_SURVEY_STATUSES = ['DANG_NHAP', 'IN_PROGRESS'];
+
+/** MỘT định nghĩa duy nhất cho "hộ đã hoàn thành" – dùng cho ghi Firebase, bảng tiến độ và danh sách hộ. */
+export function isCompletedSurveyStatus(status?: string): boolean {
+  return COMPLETED_SURVEY_STATUSES.includes(status || '');
+}
+
+/** MỘT định nghĩa duy nhất cho "hộ đang nhập". */
+export function isInProgressSurveyStatus(status?: string): boolean {
+  return IN_PROGRESS_SURVEY_STATUSES.includes(status || '');
+}
+
+/**
+ * Chọn đúng 10 hộ chính thức của một địa bàn, KẾT QUẢ GIỐNG NHAU trên mọi máy:
+ * - chỉ lấy hộ chính thức;
+ * - các hộ trùng STT mẫu (trừ STT trống/"DP") chỉ giữ 1 hộ: ưu tiên hộ đã hoàn thành > đang nhập > chưa nhập, rồi hộ cập nhật mới hơn;
+ * - sắp theo STT mẫu tăng dần rồi mới cắt lấy 10 hộ (không phụ thuộc thứ tự mảng trên từng máy).
+ */
+export function selectOfficialHouseholds<T extends Household>(households: T[]): T[] {
+  const rank = (h: T) => isCompletedSurveyStatus(h.surveyStatus) ? 2 : isInProgressSurveyStatus(h.surveyStatus) ? 1 : 0;
+  const time = (h: T) => {
+    const t = Date.parse(h.updatedAt || '');
+    return Number.isFinite(t) ? t : 0;
+  };
+  const best = new Map<string, T>();
+  households.filter(isOfficialSurveyHousehold).forEach(h => {
+    const stt = (h.sttMau || '').trim().toUpperCase();
+    const key = stt && stt !== 'DP'
+      ? `stt:${/^\d+$/.test(stt) ? String(Number(stt)) : stt}`
+      : `id:${h.id}`;
+    const current = best.get(key);
+    if (!current || rank(h) > rank(current) || (rank(h) === rank(current) && time(h) > time(current))) {
+      best.set(key, h);
+    }
+  });
+  const sttNumber = (h: T) => /^\d+$/.test((h.sttMau || '').trim()) ? Number(h.sttMau) : Number.MAX_SAFE_INTEGER;
+  return Array.from(best.values())
+    .sort((a, b) =>
+      sttNumber(a) - sttNumber(b) ||
+      (a.sttMau || '').localeCompare(b.sttMau || '', 'vi', { numeric: true }) ||
+      a.id.localeCompare(b.id)
+    )
+    .slice(0, OFFICIAL_HOUSEHOLDS_PER_AREA);
+}
+
+/**
+ * Chọn MỘT bản ghi tiến độ trên Firebase cho một địa bàn (không cộng dồn):
+ * - nếu biết ĐTV đang được giao địa bàn → chỉ nhận bản ghi của ĐTV đó (bỏ bản ghi cũ của ĐTV đã bị đổi);
+ * - nếu chưa biết ai được giao → lấy bản ghi mới nhất.
+ */
+export function pickAreaCloudSnapshot(
+  snapshots: AreaProgressSnapshot[],
+  assignedSurveyorIds: Set<string>
+): AreaProgressSnapshot | null {
+  const time = (snapshot: AreaProgressSnapshot) => {
+    const t = Date.parse(snapshot.updatedAt || '');
+    return Number.isFinite(t) ? t : Number.NEGATIVE_INFINITY;
+  };
+  const latest = (list: AreaProgressSnapshot[]) =>
+    list.reduce<AreaProgressSnapshot | null>((best, item) => (!best || time(item) >= time(best) ? item : best), null);
+  if (snapshots.length === 0) return null;
+  if (assignedSurveyorIds.size > 0) {
+    return latest(snapshots.filter(item => assignedSurveyorIds.has(item.surveyorId)));
+  }
+  return latest(snapshots);
+}
+
 export function normalizeSurveyorName(name: string): string {
   return name
     .normalize('NFD')
@@ -312,30 +383,25 @@ export function createAreaProgressSnapshot(
   const areaCode = area.code.trim();
   const communeCode = (commune.communeCode || commune.id).trim();
   const areaProgressKey = getAreaProgressKey(communeCode, areaCode);
-  const areaHouseholds = households
-    .filter(h => {
+  const areaHouseholds = selectOfficialHouseholds(
+    households.filter(h => {
       const householdCommuneCode = h.communeCode?.trim() || (h.communeId === commune.id ? communeCode : '');
       return getAreaProgressKey(householdCommuneCode, h.areaCode) === areaProgressKey;
     })
-    .filter(isOfficialSurveyHousehold)
-    .slice(0, 10);
-  const completedHouseholds = areaHouseholds.filter(h =>
-    ['DA_HOAN_THANH', 'DA_DUYET', 'COMPLETED', 'HOAN_THANH'].includes(h.surveyStatus || '')
-  ).length;
-  const inProgressHouseholds = areaHouseholds.filter(h =>
-    h.surveyStatus === 'DANG_NHAP' || h.surveyStatus === 'IN_PROGRESS'
-  ).length;
+  );
+  const completedHouseholds = areaHouseholds.filter(h => isCompletedSurveyStatus(h.surveyStatus)).length;
+  const inProgressHouseholds = areaHouseholds.filter(h => isInProgressSurveyStatus(h.surveyStatus)).length;
 
   return {
     id: `${encodeURIComponent(surveyorId)}_${encodeURIComponent(areaProgressKey)}`,
-    surveyorId,
-    surveyorName,
-    areaId: area.id,
-    communeId: commune.id,
-    communeCode: commune.communeCode,
-    communeName: commune.communeName,
+    surveyorId: surveyorId || '',
+    surveyorName: surveyorName || '',
+    areaId: area.id || '',
+    communeId: commune.id || '',
+    communeCode: commune.communeCode || communeCode,
+    communeName: commune.communeName || '',
     areaCode,
-    areaName: area.name,
+    areaName: area.name || '',
     totalHouseholds: areaHouseholds.length,
     completedHouseholds,
     inProgressHouseholds,
