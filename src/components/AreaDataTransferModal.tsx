@@ -364,9 +364,15 @@ export default function AreaDataTransferModal({
         const backupObject = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
           ? parsed as Record<string, unknown>
           : undefined;
+        const indexedDbEntries = backupObject?.thongke_entries_v2 &&
+          typeof backupObject.thongke_entries_v2 === 'object' &&
+          !Array.isArray(backupObject.thongke_entries_v2)
+          ? (backupObject.thongke_entries_v2 as Record<string, unknown>).entries
+          : undefined;
         const isSurveyorBackup = Array.isArray(parsed) ||
           (backupObject?.type !== 'SURVEY_WORK_PACKAGE' && Boolean(
             backupObject?.format === 'tnh-entries-backup' ||
+            hasJsonRecords(indexedDbEntries) ||
             ['entries', 'households', 'records', 'results', 'surveys', 'areas', 'surveyAreas', 'rosters']
               .some(key => hasJsonRecords(backupObject?.[key])) ||
             (typeof backupObject?.data === 'object' && backupObject.data !== null &&

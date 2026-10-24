@@ -229,13 +229,22 @@ export function parseSurveyorEntryBackup(value: unknown): SurveyorEntryBackup {
     });
   };
 
+  const isIndexedDbBackup = Boolean(backup && isRecord(backup.thongke_entries_v2));
+
   if (Array.isArray(value)) {
     addRecords(value);
   } else if (backup?.format === 'tnh-entries-backup' && backup.version === 1) {
     addRecords(backup.entries);
   } else if (backup) {
     const data = isRecord(backup.data) ? backup.data : {};
-    const directEntries = recordsFrom(backup.entries) || recordsFrom(data.entries) || undefined;
+    const indexedDbStores = isRecord(backup.thongke_entries_v2)
+      ? backup.thongke_entries_v2
+      : {};
+    const directEntries =
+      recordsFrom(backup.entries) ||
+      recordsFrom(data.entries) ||
+      recordsFrom(indexedDbStores.entries) ||
+      undefined;
     if (directEntries) {
       const hasNestedHouseholds = directEntries.some(entry =>
         isRecord(entry) && Array.isArray(entry.households)
@@ -298,7 +307,9 @@ export function parseSurveyorEntryBackup(value: unknown): SurveyorEntryBackup {
       ? record.questionnaire
       : isRecord(record.form)
         ? record.form
-        : undefined;
+        : isIndexedDbBackup
+          ? createDefaultQuestionnaire()
+          : undefined;
     if (
       (!id && !(sttMau && (areaKey || (areaCode && (communeCode || communeId || areaId))))) ||
       !questionnaireValue
