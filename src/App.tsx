@@ -3906,19 +3906,23 @@ export default function App() {
         continue;
       }
       const existing = nextHouseholds[householdIndex];
-      const commune = communesById.get(existing.communeId) || communesByCode.get(existing.communeCode);
+      const commune = communesByCode.get(existing.communeCode) || communesById.get(existing.communeId);
       const existingAreaKey = getAreaProgressKey(commune?.communeCode || existing.communeCode, existing.areaCode);
       const area = (existingAreaKey ? areasByProgressKey.get(existingAreaKey) : undefined) ||
         (!existingAreaKey ? areasById.get(existing.areaId) : undefined);
       if (!area || !commune) {
         throw new Error(`Không xác định được địa bàn của hộ ${existing.sttMau || existing.id}; chưa nhập dữ liệu nào.`);
       }
+      const existingCommuneCode = (existing.communeCode || commune.communeCode || '').trim();
       const locationMismatch =
         (entry.areaCode && normalizeAreaCode(entry.areaCode) !== normalizeAreaCode(existing.areaCode)) ||
-        (entry.communeCode && entry.communeCode.trim() !== (commune.communeCode || '').trim()) ||
+        (entry.communeCode && entry.communeCode.trim() !== existingCommuneCode) ||
         (entry.sttMau && normalizeSampleNumber(entry.sttMau) !== normalizeSampleNumber(existing.sttMau || ''));
       if (locationMismatch) {
-        throw new Error(`Mã xã/địa bàn/số thứ tự trong file không khớp hộ ${existing.sttMau || existing.id}; chưa nhập dữ liệu nào.`);
+        throw new Error(
+          `Mã xã/địa bàn/số thứ tự trong file (${entry.communeCode || '—'}/${entry.areaCode || '—'}/${entry.sttMau || '—'}) ` +
+          `không khớp bảng kê (${existingCommuneCode || '—'}/${existing.areaCode || '—'}/${existing.sttMau || '—'}); chưa nhập dữ liệu nào.`
+        );
       }
 
       const assignedSurveyor = surveyors.find(surveyor =>
