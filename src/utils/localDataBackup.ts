@@ -30,6 +30,7 @@ export interface SurveyorEntryBackupRecord {
   communeId?: string;
   communeCode?: string;
   sttMau?: string;
+  householdHead?: string;
   assignedSurveyorId?: string;
   assignedSurveyorName?: string;
   questionnaire: NonNullable<Household['questionnaire']>;
@@ -365,6 +366,9 @@ export function parseSurveyorEntryBackup(value: unknown): SurveyorEntryBackup {
       ...(communeId ? { communeId } : {}),
       ...(communeCode ? { communeCode } : {}),
       ...(sttMau ? { sttMau } : {}),
+      ...(text(record.householdHead, text(rosterHousehold?.householdHead))
+        ? { householdHead: text(record.householdHead, text(rosterHousehold?.householdHead)) }
+        : {}),
       ...(text(record.assignedSurveyorId, surveyorId)
         ? { assignedSurveyorId: text(record.assignedSurveyorId, surveyorId) }
         : {}),

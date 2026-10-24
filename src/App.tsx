@@ -3826,19 +3826,34 @@ export default function App() {
       if (areaKey && !areasByProgressKey.has(areaKey)) areasByProgressKey.set(areaKey, area);
     });
     const householdIndexesByLocation = new Map<string, number[]>();
+    const householdIndexesByAreaAndHead = new Map<string, number[]>();
     const normalizeSampleNumber = (value: string) =>
       /^\d+$/.test(value.trim()) ? String(Number(value.trim())) : value.trim().toUpperCase();
     const normalizeAreaCode = (value: string) =>
       /^\d+$/.test(value.trim()) ? String(Number(value.trim())) : value.trim().toUpperCase();
+    const normalizeHouseholdHead = (value: string) => normalizeSurveyorName(value);
+    const getAreaAndHeadKey = (communeCode: string, areaCode: string, householdHead: string) =>
+      `${communeCode.trim()}_${normalizeAreaCode(areaCode)}_${normalizeHouseholdHead(householdHead)}`;
     const addHouseholdLocation = (key: string, index: number) => {
       const indexes = householdIndexesByLocation.get(key) || [];
       indexes.push(index);
       householdIndexesByLocation.set(key, indexes);
     };
+    const addHouseholdAreaAndHead = (key: string, index: number) => {
+      const indexes = householdIndexesByAreaAndHead.get(key) || [];
+      indexes.push(index);
+      householdIndexesByAreaAndHead.set(key, indexes);
+    };
     nextHouseholds.forEach((household, index) => {
       const communeCode = household.communeCode?.trim() || '';
       const areaCode = household.areaCode ? normalizeAreaCode(household.areaCode) : '';
       const sampleNumber = household.sttMau ? normalizeSampleNumber(household.sttMau) : '';
+      if (communeCode && areaCode && household.householdHead?.trim()) {
+        addHouseholdAreaAndHead(
+          getAreaAndHeadKey(communeCode, areaCode, household.householdHead),
+          index
+        );
+      }
       const identifiers = [
         communeCode && areaCode && sampleNumber
           ? `${communeCode}_${areaCode}_${sampleNumber}`
@@ -3880,7 +3895,23 @@ export default function App() {
       }
 
       let householdIndex: number | undefined;
-      if (entry.id) {
+      let matchedByHouseholdHead = false;
+      if (entry.communeCode && entry.areaCode && entry.householdHead?.trim()) {
+        const matchingIndexes = householdIndexesByAreaAndHead.get(
+          getAreaAndHeadKey(entry.communeCode, entry.areaCode, entry.householdHead)
+        ) || [];
+        if (matchingIndexes.length === 1) {
+          householdIndex = matchingIndexes[0];
+          matchedByHouseholdHead = true;
+        } else if (matchingIndexes.length > 1) {
+          ambiguousCount++;
+          continue;
+        } else {
+          unmatchedCount++;
+          continue;
+        }
+      }
+      if (householdIndex === undefined && entry.id) {
         householdIndex = householdIndexById.get(entry.id);
       }
       if (householdIndex === undefined && (entry.areaCode || entry.areaKey) && entry.sttMau) {
@@ -3917,7 +3948,8 @@ export default function App() {
       const locationMismatch =
         (entry.areaCode && normalizeAreaCode(entry.areaCode) !== normalizeAreaCode(existing.areaCode)) ||
         (entry.communeCode && entry.communeCode.trim() !== existingCommuneCode) ||
-        (entry.sttMau && normalizeSampleNumber(entry.sttMau) !== normalizeSampleNumber(existing.sttMau || ''));
+        (!matchedByHouseholdHead && entry.sttMau &&
+          normalizeSampleNumber(entry.sttMau) !== normalizeSampleNumber(existing.sttMau || ''));
       if (locationMismatch) {
         throw new Error(
           `Mã xã/địa bàn/số thứ tự trong file (${entry.communeCode || '—'}/${entry.areaCode || '—'}/${entry.sttMau || '—'}) ` +
