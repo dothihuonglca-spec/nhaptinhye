@@ -803,3 +803,102 @@ export function reconcileCloudProgress(
     a.snapshot.areaCode.localeCompare(b.snapshot.areaCode, 'vi', { numeric: true })
   );
 }
+
+// ---------------------------------------------------------------------------
+// Hộ thay thế (hộ dự phòng được chuyển thành hộ chính thức) khi nạp JSON của ĐTV
+// ---------------------------------------------------------------------------
+
+function foldText(value?: string): string {
+  return (value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[đĐ]/g, 'D')
+    .toUpperCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** Hộ mẫu cũ đã bị thay (sampleStatus = "ĐÃ THAY THẾ"). */
+export function isReplacedSampleStatus(sampleStatus?: string): boolean {
+  return foldText(sampleStatus).includes('DA THAY THE');
+}
+
+/** Hộ được ghi rõ là chính thức. */
+export function isOfficialSampleStatus(sampleStatus?: string): boolean {
+  return foldText(sampleStatus).includes('CHINH THUC');
+}
+
+/**
+ * Ghi chú do app tự thêm khi thay thế: "[Thay thế cho hộ mẫu: TÊN (Gốc: STT_GỐC) - Lý do: ...]".
+ * Có ghi chú này nghĩa là hộ đó là hộ dự phòng đã được đưa vào thay một hộ mẫu.
+ */
+export function parseReplacementNote(note?: string): { originalHead: string; originalSttGoc: string } | null {
+  const match = (note || '').match(/\[Thay thế cho hộ mẫu:\s*(.+?)\s*\(Gốc:\s*([^)]*)\)/i);
+  if (!match) return null;
+  return { originalHead: match[1].trim(), originalSttGoc: match[2].trim() };
+}
+
+/** Hộ dự phòng đã thay vào vị trí hộ chính thức. */
+export function isReplacementHousehold(h: Pick<Household, 'sampleStatus' | 'note'>): boolean {
+  return isOfficialSampleStatus(h.sampleStatus) && parseReplacementNote(h.note) !== null;
+}
+
+export function sameHouseholdName(a?: string, b?: string): boolean {
+  return foldText(a) !== '' && foldText(a) === foldText(b);
+}
+
+/**
+ * Tìm hộ trong cùng địa bàn theo (STT gốc, tên chủ hộ). Chỉ trả về khi duy nhất,
+ * không lệ thuộc STT mẫu (hộ thay thế có thể mang lại STT mẫu của hộ bị thay).
+ */
+export function findHouseholdBySourceKey<T extends Household>(
+  list: T[],
+  isInArea: (household: T) => boolean,
+  sttGoc?: string,
+  householdHead?: string
+): number {
+  const goc = (sttGoc || '').trim();
+  if (!goc || !householdHead?.trim()) return -1;
+  const found: number[] = [];
+  list.forEach((household, index) => {
+    if (
+      isInArea(household) &&
+      (household.sttGoc || '').trim() === goc &&
+      sameHouseholdName(household.householdHead, householdHead)
+    ) found.push(index);
+  });
+  return found.length === 1 ? found[0] : -1;
+}
+
+/**
+ * Đánh dấu hộ mẫu gốc của một hộ thay thế là "ĐÃ THAY THẾ" (nếu còn là hộ chính thức).
+ * Trả về chỉ số hộ đã đổi, hoặc -1 nếu không tìm thấy / đã được đánh dấu từ trước.
+ */
+export function markOriginalAsReplaced<T extends Household>(
+  list: T[],
+  isInArea: (household: T) => boolean,
+  replacement: Pick<Household, 'householdHead' | 'sttGoc' | 'note' | 'updatedAt'>,
+  fallbackTime: string
+): number {
+  const info = parseReplacementNote(replacement.note);
+  if (!info) return -1;
+  let index = findHouseholdBySourceKey(list, isInArea, info.originalSttGoc, info.originalHead);
+  if (index < 0) {
+    // Dự phòng: chỉ khớp theo STT gốc khi duy nhất trong địa bàn
+    const bySttGoc = list
+      .map((household, i) => ({ household, i }))
+      .filter(({ household }) => isInArea(household) && (household.sttGoc || '').trim() === info.originalSttGoc);
+    if (bySttGoc.length === 1) index = bySttGoc[0].i;
+  }
+  if (index < 0) return -1;
+  const original = list[index];
+  if (isReplacedSampleStatus(original.sampleStatus)) return -1;
+  list[index] = {
+    ...original,
+    sampleStatus: 'ĐÃ THAY THẾ',
+    note: (original.note ? `${original.note} | ` : '') +
+      `[Đã thay bằng hộ dự phòng: ${replacement.householdHead} (Gốc: ${replacement.sttGoc || ''})]`,
+    updatedAt: replacement.updatedAt || fallbackTime
+  };
+  return index;
+}
