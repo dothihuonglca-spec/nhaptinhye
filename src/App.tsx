@@ -3828,6 +3828,8 @@ export default function App() {
     const householdIndexesByLocation = new Map<string, number[]>();
     const normalizeSampleNumber = (value: string) =>
       /^\d+$/.test(value.trim()) ? String(Number(value.trim())) : value.trim().toUpperCase();
+    const normalizeAreaCode = (value: string) =>
+      /^\d+$/.test(value.trim()) ? String(Number(value.trim())) : value.trim().toUpperCase();
     const addHouseholdLocation = (key: string, index: number) => {
       const indexes = householdIndexesByLocation.get(key) || [];
       indexes.push(index);
@@ -3835,7 +3837,7 @@ export default function App() {
     };
     nextHouseholds.forEach((household, index) => {
       const communeCode = household.communeCode?.trim() || '';
-      const areaCode = household.areaCode?.trim() || '';
+      const areaCode = household.areaCode ? normalizeAreaCode(household.areaCode) : '';
       const sampleNumber = household.sttMau ? normalizeSampleNumber(household.sttMau) : '';
       const identifiers = [
         communeCode && areaCode && sampleNumber
@@ -3880,7 +3882,7 @@ export default function App() {
       let householdIndex: number | undefined;
       if ((entry.areaCode || entry.areaKey) && entry.sttMau) {
         const communeCode = entry.communeCode?.trim() || '';
-        const areaCode = entry.areaCode?.trim() || '';
+        const areaCode = entry.areaCode ? normalizeAreaCode(entry.areaCode) : '';
         const sampleNumber = normalizeSampleNumber(entry.sttMau);
         const locationKeys = [
           communeCode && areaCode ? `${communeCode}_${areaCode}_${sampleNumber}` : '',
@@ -3912,7 +3914,7 @@ export default function App() {
         throw new Error(`Không xác định được địa bàn của hộ ${existing.sttMau || existing.id}; chưa nhập dữ liệu nào.`);
       }
       const locationMismatch =
-        (entry.areaCode && entry.areaCode.trim() !== existing.areaCode.trim()) ||
+        (entry.areaCode && normalizeAreaCode(entry.areaCode) !== normalizeAreaCode(existing.areaCode)) ||
         (entry.communeCode && entry.communeCode.trim() !== (commune.communeCode || '').trim()) ||
         (entry.sttMau && normalizeSampleNumber(entry.sttMau) !== normalizeSampleNumber(existing.sttMau || ''));
       if (locationMismatch) {
