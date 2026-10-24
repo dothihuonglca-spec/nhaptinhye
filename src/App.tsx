@@ -6461,7 +6461,7 @@ export default function App() {
                   title="Nhập và tổng hợp các file JSON do Điều tra viên gửi về"
                 >
                   <Upload className="w-4 h-4 text-emerald-200" />
-                  <span>Tổng Hợp Data Từ ĐTV (.json)</span>
+                  <span>Giao nhận JSON ĐTV</span>
                 </button>
               </>
             ) : (
@@ -6930,6 +6930,10 @@ export default function App() {
               setActiveHouseholdForm(hh);
             }}
             onNavigateToHouseholdEntry={handleNavigateToHouseholdEntryFromProgress}
+            onOpenDataTransfer={() => {
+              setDataTransferMode('import');
+              setIsDataTransferModalOpen(true);
+            }}
             showNotification={showNotification}
           />
         )}

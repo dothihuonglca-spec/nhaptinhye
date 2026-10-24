@@ -82,6 +82,25 @@ export interface AreaProgressSnapshot {
   updatedAt: string;
 }
 
+export function isOfficialSurveyHousehold(household: Pick<Household, 'sampleStatus' | 'sttMau'>): boolean {
+  const status = (household.sampleStatus || '').normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[đĐ]/g, 'D')
+    .toUpperCase()
+    .trim();
+  if (status.includes('CHINH THUC')) return true;
+  if (
+    household.sttMau?.trim().toUpperCase() === 'DP' ||
+    status.includes('DU PHONG') ||
+    status.includes('RESERVE') ||
+    status === 'DP' ||
+    status.includes('DA THAY THE')
+  ) {
+    return false;
+  }
+  return true;
+}
+
 export function normalizeSurveyorName(name: string): string {
   return name
     .normalize('NFD')
@@ -283,24 +302,24 @@ export function createAreaProgressSnapshot(
   households: Household[]
 ): AreaProgressSnapshot {
   const areaHouseholds = households
-    .filter(h =>
-      h.areaId === area.id ||
-      (h.areaCode === area.code && (
-        h.communeId === area.communeId ||
-        h.communeCode === commune.communeCode
-      ))
-    )
-    .filter(h => (h.sampleStatus || 'CHÍNH THỨC') !== 'DỰ PHÒNG')
+    .filter(h => {
+      if (h.areaCode.trim() !== area.code.trim()) return false;
+      if (h.communeCode && commune.communeCode) {
+        return h.communeCode.trim() === commune.communeCode.trim();
+      }
+      return h.communeId === commune.id;
+    })
+    .filter(isOfficialSurveyHousehold)
     .slice(0, 10);
   const completedHouseholds = areaHouseholds.filter(h =>
-    h.surveyStatus === 'DA_HOAN_THANH' || h.surveyStatus === 'DA_DUYET'
+    ['DA_HOAN_THANH', 'DA_DUYET', 'COMPLETED', 'HOAN_THANH'].includes(h.surveyStatus || '')
   ).length;
   const inProgressHouseholds = areaHouseholds.filter(h =>
-    h.surveyStatus === 'DANG_NHAP'
+    h.surveyStatus === 'DANG_NHAP' || h.surveyStatus === 'IN_PROGRESS'
   ).length;
 
   return {
-    id: `${encodeURIComponent(surveyorId)}_${encodeURIComponent(area.id)}`,
+    id: `${encodeURIComponent(surveyorId)}_${encodeURIComponent(`${commune.communeCode || commune.id}_${area.code}`)}`,
     surveyorId,
     surveyorName,
     areaId: area.id,

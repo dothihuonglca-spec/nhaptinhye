@@ -6,12 +6,12 @@
 import React, { useState, useMemo } from 'react';
 import type { Commune, Household, SurveyArea } from '../App';
 import type { Surveyor } from '../types/user';
-import type { AreaProgressSnapshot } from '../utils/areaDataTransfer';
+import { isOfficialSurveyHousehold, type AreaProgressSnapshot } from '../utils/areaDataTransfer';
 import { 
   Users, CheckCircle2, Clock, AlertCircle, Search, 
   FileSpreadsheet, FileText, Filter, Eye, ChevronRight, MapPin, 
   UserCheck, ExternalLink, RefreshCw, BarChart3, TrendingUp,
-  Building, Phone, ArrowUpRight, X, LayoutGrid, ListTree
+  Building, Phone, ArrowUpRight, X, LayoutGrid, ListTree, Upload
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 
@@ -24,6 +24,7 @@ interface SurveyorProgressViewProps {
   cloudProgress: AreaProgressSnapshot[];
   onOpenHouseholdForm?: (household: Household) => void;
   onNavigateToHouseholdEntry?: (surveyorNameOrId: string, areaId?: string, communeId?: string) => void;
+  onOpenDataTransfer?: () => void;
   showNotification: (type: 'success' | 'error', msg: string) => void;
 }
 
@@ -62,6 +63,7 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
   cloudProgress,
   onOpenHouseholdForm,
   onNavigateToHouseholdEntry,
+  onOpenDataTransfer,
   showNotification
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
@@ -201,6 +203,7 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
             myAssigned.has(a.id) || 
             myAssigned.has(a.code) || 
             myAssigned.has(`${a.communeId}_${a.code}`) ||
+            (a.communeCode && myAssigned.has(`${a.communeCode}_${a.code}`)) ||
             myDirectHhAreaIds.has(a.id) ||
             myDirectHhAreaIds.has(a.code)
           );
@@ -215,10 +218,26 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
       }
     }
 
+    const communeMap = new Map<string, Commune>();
+    communes.forEach(c => {
+      if (c.id) communeMap.set(c.id, c);
+      if (c.communeCode) communeMap.set(c.communeCode, c);
+    });
+
+    const uniqueAreas = new Map<string, SurveyArea>();
+    effectiveAreas.forEach(area => {
+      const commune = communeMap.get(area.communeId) || communeMap.get((area as any).communeCode);
+      const communeCode = commune?.communeCode || area.communeCode;
+      const key = communeCode && area.code
+        ? `${communeCode.trim()}_${area.code.trim()}`
+        : area.id;
+      if (!uniqueAreas.has(key)) uniqueAreas.set(key, area);
+    });
+    effectiveAreas = Array.from(uniqueAreas.values());
+
     // Pre-index households and communes for O(1) lightning fast lookups
     const hhByAreaId = new Map<string, Household[]>();
     const hhByCommuneAndAreaCode = new Map<string, Household[]>();
-    const hhByAreaCode = new Map<string, Household[]>();
 
     households.forEach(h => {
       if (h.areaId) {
@@ -226,38 +245,35 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
         hhByAreaId.get(h.areaId)!.push(h);
       }
       if (h.areaCode) {
-        if (!hhByAreaCode.has(h.areaCode)) hhByAreaCode.set(h.areaCode, []);
-        hhByAreaCode.get(h.areaCode)!.push(h);
-
-        const cKey = `${h.communeId || h.communeCode || 'default'}_${h.areaCode}`;
+        const householdCommune = communeMap.get(h.communeId) || communeMap.get(h.communeCode || '');
+        const communeCode = householdCommune?.communeCode || h.communeCode || h.communeId || 'default';
+        const cKey = `${communeCode}_${h.areaCode}`;
         if (!hhByCommuneAndAreaCode.has(cKey)) hhByCommuneAndAreaCode.set(cKey, []);
         hhByCommuneAndAreaCode.get(cKey)!.push(h);
       }
     });
 
-    const communeMap = new Map<string, Commune>();
-    communes.forEach(c => {
-      if (c.id) communeMap.set(c.id, c);
-      if (c.communeCode) communeMap.set(c.communeCode, c);
-    });
-
     return effectiveAreas.map(area => {
       const commune = communeMap.get(area.communeId) || communeMap.get((area as any).communeCode);
+      const communeCode = commune?.communeCode || area.communeCode;
       
-      const cKey = `${area.communeId || commune?.id || 'default'}_${area.code}`;
-      let allAreaHHs = hhByCommuneAndAreaCode.get(cKey) || hhByAreaId.get(area.id) || hhByAreaCode.get(area.code) || [];
+      const cKey = `${communeCode || area.communeId || 'default'}_${area.code}`;
+      let allAreaHHs = hhByCommuneAndAreaCode.get(cKey) || [];
 
-      if (allAreaHHs.length === 0) {
+      if (allAreaHHs.length === 0 && !communeCode) {
+        allAreaHHs = hhByAreaId.get(area.id) || [];
+      }
+      if (allAreaHHs.length === 0 && !communeCode) {
         allAreaHHs = households.filter(h => {
-          if (h.areaId === area.id) return true;
-          if (h.areaCode === area.code && (h.communeId === area.communeId || (h as any).communeCode === area.communeCode || (commune && (h.communeId === commune.id || h.communeCode === commune.communeCode)))) return true;
-          return false;
+          return h.areaId === area.id && h.areaCode === area.code;
         });
       }
 
-      // Chỉ tính tối đa 10 hộ chính thức mỗi địa bàn (bỏ qua hộ dự phòng để tính tiến độ chuẩn 10 hộ/địa bàn)
-      const officialHHs = allAreaHHs.filter(h => (h.sampleStatus || 'CHÍNH THỨC') !== 'DỰ PHÒNG').slice(0, 10);
-      const assignedHHs = officialHHs.length > 0 ? officialHHs : allAreaHHs.slice(0, 10);
+      // A missing official roster must not turn reserve households into progress.
+      const officialHHs = Array.from(
+        new Map(allAreaHHs.filter(isOfficialSurveyHousehold).map(h => [h.id, h])).values()
+      ).slice(0, 10);
+      const assignedHHs = officialHHs;
 
       const localTotalHouseholds = assignedHHs.length;
       const localCompletedHouseholds = assignedHHs.filter(h =>
@@ -281,26 +297,34 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
             s.assignedAreas.includes(area.id) || 
             s.assignedAreas.includes(area.code) || 
             s.assignedAreas.includes(`${area.communeId}_${area.code}`) ||
-            (commune && s.assignedAreas.includes(`${commune.communeCode}_${area.code}`))
+            (communeCode && s.assignedAreas.includes(`${communeCode}_${area.code}`))
           ) {
             surveyorSet.add(s.name);
           }
         }
       });
 
-      const remoteProgress = cloudProgress.filter(item =>
-        item.areaId === area.id ||
-        (item.areaCode === area.code && (
-          item.communeId === area.communeId ||
-          item.communeCode === area.communeCode
-        ))
-      );
+      const remoteProgressBySurveyor = new Map<string, AreaProgressSnapshot>();
+      cloudProgress
+        .filter(item => {
+          if (communeCode && item.communeCode && item.areaCode) {
+            return item.communeCode.trim() === communeCode.trim() && item.areaCode.trim() === area.code.trim();
+          }
+          return item.areaId === area.id;
+        })
+        .forEach(item => {
+          const key = item.surveyorId || item.surveyorName || item.id;
+          const existing = remoteProgressBySurveyor.get(key);
+          if (!existing || Date.parse(item.updatedAt) >= Date.parse(existing.updatedAt)) {
+            remoteProgressBySurveyor.set(key, item);
+          }
+        });
+      const remoteProgress = Array.from(remoteProgressBySurveyor.values());
       remoteProgress.forEach(item => surveyorSet.add(item.surveyorName));
-      const totalHouseholds = Math.max(
-        localTotalHouseholds,
-        ...remoteProgress.map(item => item.totalHouseholds),
-        0
-      );
+      const remoteTotalHouseholds = Math.min(10, Math.max(0, ...remoteProgress.map(item => item.totalHouseholds)));
+      const totalHouseholds = allAreaHHs.length > 0
+        ? localTotalHouseholds
+        : remoteTotalHouseholds;
       const doneTotal = Math.min(totalHouseholds, Math.max(
         localCompletedHouseholds,
         remoteProgress.reduce((total, item) => total + item.completedHouseholds, 0)
@@ -540,6 +564,17 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            {currentUser.role === 'ADMIN' && (
+              <button
+                type="button"
+                onClick={onOpenDataTransfer}
+                className="px-3.5 py-1.5 bg-sky-800 hover:bg-sky-700 text-white rounded font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
+                title="Nhập file kết quả JSON của ĐTV hoặc xuất gói phân công"
+              >
+                <Upload className="w-4 h-4" />
+                <span>Giao nhận JSON ĐTV</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={handleExportExcelProgress}
