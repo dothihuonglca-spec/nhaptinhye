@@ -287,9 +287,11 @@ export function parseSurveyorEntryBackup(value: unknown): SurveyorEntryBackup {
   const ids = new Set<string>();
   const entries = candidates.map(({ record, area, surveyorId, surveyorName }): SurveyorEntryBackupRecord => {
     const id = text(record.id);
-    const communeCode = text(record.communeCode, text(area?.communeCode));
-    const areaCode = text(record.areaCode, text(area?.areaCode, text(area?.code)));
-    const sttMau = text(record.sttMau, text(record.sampleNumber, text(record.householdNumber)));
+    const idLocation = id.match(/^hh-c-(\d+)-(\d+)-(.+)$/i);
+    const communeCode = text(record.communeCode, text(area?.communeCode, idLocation?.[1]));
+    const areaCode = text(record.areaCode, text(area?.areaCode, text(area?.code, idLocation?.[2])));
+    const sttMau = text(record.sttMau, text(record.sampleNumber, text(record.householdNumber, idLocation?.[3])));
+    const areaKey = text(record.areaKey);
     const areaId = text(record.areaId, text(area?.areaId, text(area?.id)));
     const communeId = text(record.communeId, text(area?.communeId));
     const questionnaireValue = isRecord(record.questionnaire)
@@ -298,12 +300,12 @@ export function parseSurveyorEntryBackup(value: unknown): SurveyorEntryBackup {
         ? record.form
         : undefined;
     if (
-      (!id && !(areaCode && sttMau && (communeCode || communeId || areaId))) ||
+      (!id && !(sttMau && (areaKey || (areaCode && (communeCode || communeId || areaId))))) ||
       !questionnaireValue
     ) {
       throw new Error('File JSON có phiếu thiếu mã hộ/địa bàn hoặc nội dung bảng hỏi.');
     }
-    const uniqueId = id || `${communeCode || communeId || areaId}_${areaCode}_${sttMau}`;
+    const uniqueId = id || `${areaKey || communeCode || communeId || areaId}_${areaCode}_${sttMau}`;
     if (ids.has(uniqueId)) {
       throw new Error('File backup có mã hộ bị lặp; chưa khôi phục dữ liệu nào.');
     }
@@ -332,7 +334,7 @@ export function parseSurveyorEntryBackup(value: unknown): SurveyorEntryBackup {
 
     return {
       ...(id ? { id } : {}),
-      ...(typeof record.areaKey === 'string' ? { areaKey: record.areaKey } : {}),
+      ...(areaKey ? { areaKey } : {}),
       ...(areaId ? { areaId } : {}),
       ...(areaCode ? { areaCode } : {}),
       ...(communeId ? { communeId } : {}),

@@ -3816,21 +3816,29 @@ export default function App() {
     const householdIndexById = new Map(nextHouseholds.map((household, index) => [household.id, index]));
     const areasById = new Map(areas.map(area => [area.id, area]));
     const householdIndexesByLocation = new Map<string, number[]>();
+    const normalizeSampleNumber = (value: string) =>
+      /^\d+$/.test(value.trim()) ? String(Number(value.trim())) : value.trim().toUpperCase();
     const addHouseholdLocation = (key: string, index: number) => {
       const indexes = householdIndexesByLocation.get(key) || [];
       indexes.push(index);
       householdIndexesByLocation.set(key, indexes);
     };
     nextHouseholds.forEach((household, index) => {
+      const communeCode = household.communeCode?.trim() || '';
+      const areaCode = household.areaCode?.trim() || '';
+      const sampleNumber = household.sttMau ? normalizeSampleNumber(household.sttMau) : '';
       const identifiers = [
-        household.communeCode && household.areaCode && household.sttMau
-          ? `${household.communeCode}_${household.areaCode}_${household.sttMau}`
+        communeCode && areaCode && sampleNumber
+          ? `${communeCode}_${areaCode}_${sampleNumber}`
           : '',
-        household.communeId && household.areaCode && household.sttMau
-          ? `${household.communeId}_${household.areaCode}_${household.sttMau}`
+        household.communeId && areaCode && sampleNumber
+          ? `${household.communeId}_${areaCode}_${sampleNumber}`
           : '',
         household.areaId && household.sttMau
-          ? `${household.areaId}_${household.sttMau}`
+          ? `${household.areaId}_${sampleNumber}`
+          : '',
+        communeCode && areaCode && sampleNumber
+          ? `areaKey:${communeCode}${areaCode}_${sampleNumber}`
           : ''
       ].filter(Boolean);
       identifiers.forEach(identifier => addHouseholdLocation(identifier, index));
@@ -3860,11 +3868,15 @@ export default function App() {
       }
 
       let householdIndex = entry.id ? householdIndexById.get(entry.id) : undefined;
-      if (householdIndex === undefined && entry.areaCode && entry.sttMau) {
+      if ((entry.areaCode || entry.areaKey) && entry.sttMau) {
+        const communeCode = entry.communeCode?.trim() || '';
+        const areaCode = entry.areaCode?.trim() || '';
+        const sampleNumber = normalizeSampleNumber(entry.sttMau);
         const locationKeys = [
-          entry.communeCode ? `${entry.communeCode}_${entry.areaCode}_${entry.sttMau}` : '',
-          entry.communeId ? `${entry.communeId}_${entry.areaCode}_${entry.sttMau}` : '',
-          entry.areaId ? `${entry.areaId}_${entry.sttMau}` : ''
+          communeCode && areaCode ? `${communeCode}_${areaCode}_${sampleNumber}` : '',
+          entry.communeId && areaCode ? `${entry.communeId}_${areaCode}_${sampleNumber}` : '',
+          entry.areaId && sampleNumber ? `${entry.areaId}_${sampleNumber}` : '',
+          entry.areaKey ? `areaKey:${entry.areaKey.trim()}_${sampleNumber}` : ''
         ].filter(Boolean);
         const matchingIndexes = Array.from(new Set(locationKeys.flatMap(key =>
           householdIndexesByLocation.get(key) || []
@@ -3893,9 +3905,9 @@ export default function App() {
         throw new Error(`Không xác định được địa bàn của hộ ${existing.sttMau || existing.id}; chưa nhập dữ liệu nào.`);
       }
       const locationMismatch =
-        (entry.areaCode && entry.areaCode !== existing.areaCode) ||
-        (entry.communeCode && entry.communeCode !== existing.communeCode) ||
-        (entry.sttMau && entry.sttMau !== existing.sttMau);
+        (entry.areaCode && entry.areaCode.trim() !== existing.areaCode.trim()) ||
+        (entry.communeCode && entry.communeCode.trim() !== existing.communeCode.trim()) ||
+        (entry.sttMau && normalizeSampleNumber(entry.sttMau) !== normalizeSampleNumber(existing.sttMau || ''));
       if (locationMismatch) {
         throw new Error(`Mã xã/địa bàn/số thứ tự trong file không khớp hộ ${existing.sttMau || existing.id}; chưa nhập dữ liệu nào.`);
       }
@@ -3918,19 +3930,19 @@ export default function App() {
         .filter((name): name is string => typeof name === 'string' && Boolean(name.trim()))
         .map(normalizeSurveyorName);
       const incomingSurveyors = Array.from(new Set(incomingNames.flatMap(name => surveyorsByName.get(name) || [])));
+      const areaAssignmentMatches = surveyors.filter(surveyor =>
+        surveyor.role === 'SURVEYOR' &&
+        (surveyor.assignedAreas || []).some(key =>
+          key === area.id ||
+          key === `${commune.communeCode}_${area.code}` ||
+          key === `${commune.id}_${area.code}`
+        )
+      );
       const resolvedSurveyor = assignedSurveyor ||
         (assignedNameMatches.length === 1 ? assignedNameMatches[0] : undefined) ||
+        (areaAssignmentMatches.length === 1 ? areaAssignmentMatches[0] : undefined) ||
         incomingSurveyorById ||
         (incomingSurveyors.length === 1 ? incomingSurveyors[0] : undefined);
-      if (!resolvedSurveyor) {
-        throw new Error(`Không xác định được ĐTV phụ trách hộ ${existing.sttMau || existing.id}; chưa nhập dữ liệu nào.`);
-      }
-      if (incomingSurveyors.length > 1 ||
-        (incomingSurveyors.length === 1 && incomingSurveyors[0].id !== resolvedSurveyor.id) ||
-        (incomingSurveyorById && incomingSurveyorById.id !== resolvedSurveyor.id) ||
-        (assignedNameMatches.length > 1 && !assignedSurveyor)) {
-        throw new Error(`Tên ĐTV trong backup không khớp phân công của hộ ${existing.sttMau || existing.id}; chưa nhập dữ liệu nào.`);
-      }
 
       const incomingTime = Date.parse(entry.updatedAt || importedAt);
       const existingTime = Date.parse(existing.updatedAt || '');
@@ -3953,17 +3965,23 @@ export default function App() {
             : 'DA_HOAN_THANH';
       nextHouseholds[householdIndex] = {
         ...existing,
-        assignedSurveyorId: resolvedSurveyor.id,
-        assignedSurveyorName: resolvedSurveyor.name,
+        ...(resolvedSurveyor
+          ? {
+            assignedSurveyorId: resolvedSurveyor.id,
+            assignedSurveyorName: resolvedSurveyor.name
+          }
+          : {}),
         ...(entry.membersCount !== undefined ? { membersCount: entry.membersCount } : {}),
         ...(entry.membersCountEntered !== undefined ? { membersCountEntered: entry.membersCountEntered } : {}),
         ...(entry.workingMembersCount !== undefined ? { workingMembersCount: entry.workingMembersCount } : {}),
         questionnaire: { ...existing.questionnaire, ...entry.questionnaire },
         surveyStatus: normalizedStatus,
         updatedAt: entry.updatedAt || importedAt,
-        updatedBy: entry.updatedBy || resolvedSurveyor.name
+        updatedBy: entry.updatedBy || resolvedSurveyor?.name || existing.updatedBy || ''
       };
-      processedAreas.set(`${resolvedSurveyor.id}:${area.id}`, { area, commune, surveyor: resolvedSurveyor });
+      if (resolvedSurveyor) {
+        processedAreas.set(`${resolvedSurveyor.id}:${area.id}`, { area, commune, surveyor: resolvedSurveyor });
+      }
       updatedCount++;
     }
 
@@ -3995,7 +4013,7 @@ export default function App() {
       )
     );
 
-    let progressSynced = true;
+    let progressSynced = processedAreas.size > 0;
     try {
       await Promise.all(snapshots.map(snapshot =>
         setDoc(doc(db, 'areaProgress', snapshot.id), snapshot)
