@@ -31,6 +31,18 @@ export interface SurveyorEntryBackupRecord {
   communeCode?: string;
   sttMau?: string;
   householdHead?: string;
+  /** Thông tin cấu trúc mẫu - cần để nhận ra hộ dự phòng đã thay vào và hộ mẫu đã bị thay */
+  sampleStatus?: string;
+  sttGoc?: string;
+  note?: string;
+  address?: string;
+  phone?: string;
+  sectorCode?: Household['sectorCode'];
+  sectorName?: string;
+  areaName?: string;
+  communeName?: string;
+  tkcsCode?: string;
+  tkcsName?: string;
   assignedSurveyorId?: string;
   assignedSurveyorName?: string;
   questionnaire: NonNullable<Household['questionnaire']>;
@@ -369,6 +381,23 @@ export function parseSurveyorEntryBackup(value: unknown): SurveyorEntryBackup {
       ...(text(record.householdHead, text(rosterHousehold?.householdHead))
         ? { householdHead: text(record.householdHead, text(rosterHousehold?.householdHead)) }
         : {}),
+      ...(text(record.sampleStatus, text(rosterHousehold?.sampleStatus))
+        ? { sampleStatus: text(record.sampleStatus, text(rosterHousehold?.sampleStatus)) }
+        : {}),
+      ...(text(record.sttGoc, text(rosterHousehold?.sttGoc))
+        ? { sttGoc: text(record.sttGoc, text(rosterHousehold?.sttGoc)) }
+        : {}),
+      ...(text(record.note, text(rosterHousehold?.note)) ? { note: text(record.note, text(rosterHousehold?.note)) } : {}),
+      ...(text(record.address, text(rosterHousehold?.address)) ? { address: text(record.address, text(rosterHousehold?.address)) } : {}),
+      ...(text(record.phone, text(rosterHousehold?.phone)) ? { phone: text(record.phone, text(rosterHousehold?.phone)) } : {}),
+      ...([1, 2, 3, 4].includes(Number(record.sectorCode ?? rosterHousehold?.sectorCode))
+        ? { sectorCode: Number(record.sectorCode ?? rosterHousehold?.sectorCode) as Household['sectorCode'] }
+        : {}),
+      ...(text(record.sectorName, text(rosterHousehold?.sectorName)) ? { sectorName: text(record.sectorName, text(rosterHousehold?.sectorName)) } : {}),
+      ...(text(record.areaName, text(area?.areaName, text(area?.name))) ? { areaName: text(record.areaName, text(area?.areaName, text(area?.name))) } : {}),
+      ...(text(record.communeName, text(area?.communeName)) ? { communeName: text(record.communeName, text(area?.communeName)) } : {}),
+      ...(text(record.tkcsCode) ? { tkcsCode: text(record.tkcsCode) } : {}),
+      ...(text(record.tkcsName) ? { tkcsName: text(record.tkcsName) } : {}),
       ...(text(record.assignedSurveyorId, surveyorId)
         ? { assignedSurveyorId: text(record.assignedSurveyorId, surveyorId) }
         : {}),
