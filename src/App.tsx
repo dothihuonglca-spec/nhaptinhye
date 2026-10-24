@@ -61,7 +61,9 @@ import {
   parseSurveyorEntryBackup,
   parseLocalDataBackup,
   saveLocalDataSnapshot,
-  serializeLocalDataBackup
+  serializeLocalDataBackup,
+  hasCompletedSurveyContent,
+  isCompletedSurveyStatus
 } from './utils/localDataBackup';
 import type { SurveyorEntryBackup } from './utils/localDataBackup';
 
@@ -3349,13 +3351,45 @@ export default function App() {
       const backup = parseSurveyorEntryBackup(parsed);
       const householdsById = new Map(households.map(household => [household.id, household]));
       const areaById = new Map(areas.map(area => [area.id, area]));
+      const householdIndexesByLocation = new Map<string, Household[]>();
+      households.forEach(household => {
+        const keys = [
+          household.communeCode && household.areaCode && household.sttMau
+            ? `${household.communeCode}_${household.areaCode}_${household.sttMau}`
+            : '',
+          household.communeId && household.areaCode && household.sttMau
+            ? `${household.communeId}_${household.areaCode}_${household.sttMau}`
+            : '',
+          household.areaId && household.sttMau ? `${household.areaId}_${household.sttMau}` : ''
+        ].filter(Boolean);
+        keys.forEach(key => {
+          const matching = householdIndexesByLocation.get(key) || [];
+          matching.push(household);
+          householdIndexesByLocation.set(key, matching);
+        });
+      });
       const allowedAreaKeys = new Set(currentUser.assignedAreas || []);
       const eligibleEntries = new Map<string, typeof backup.entries[number]>();
       let unmatchedCount = 0;
       let outOfScopeCount = 0;
 
       backup.entries.forEach(entry => {
-        const household = householdsById.get(entry.id);
+        let household: Household | undefined = entry.id ? householdsById.get(entry.id) : undefined;
+        if (!household && entry.areaCode && entry.sttMau) {
+          const keys = [
+            entry.communeCode ? `${entry.communeCode}_${entry.areaCode}_${entry.sttMau}` : '',
+            entry.communeId ? `${entry.communeId}_${entry.areaCode}_${entry.sttMau}` : '',
+            entry.areaId ? `${entry.areaId}_${entry.sttMau}` : ''
+          ].filter(Boolean);
+          const matching = Array.from(new Map(keys.flatMap(key =>
+            (householdIndexesByLocation.get(key) || []).map(item => [item.id, item])
+          )).values());
+          if (matching.length === 1) household = matching[0];
+          else if (matching.length > 1) {
+            outOfScopeCount++;
+            return;
+          }
+        }
         if (!household) {
           unmatchedCount++;
           return;
@@ -3381,7 +3415,7 @@ export default function App() {
           outOfScopeCount++;
           return;
         }
-        eligibleEntries.set(entry.id, entry);
+        eligibleEntries.set(household.id, entry);
       });
 
       if (eligibleEntries.size === 0) {
@@ -3581,6 +3615,7 @@ export default function App() {
     });
     const processedAreas: { area: SurveyArea; commune: Commune; surveyorId: string; surveyorName: string }[] = [];
     let updatedCount = 0;
+    let skippedIncompleteCount = 0;
     const userDepartment = departments.find(department =>
       department.id === currentUser.departmentId || department.name === currentUser.department
     );
@@ -3639,28 +3674,16 @@ export default function App() {
           throw new Error(`Tài khoản hiện tại không có quyền nạp kết quả địa bàn ${localArea.code}.`);
         }
       }
+      let updatedEntryCount = 0;
       for (const incoming of entry.households) {
-        const hasSurveyData =
-          incoming.surveyStatus === 'DANG_NHAP' ||
-          incoming.surveyStatus === 'DA_HOAN_THANH' ||
-          incoming.surveyStatus === 'DA_DUYET' ||
-          incoming.surveyStatus === 'IN_PROGRESS' ||
-          incoming.surveyStatus === 'COMPLETED' ||
-          incoming.surveyStatus === 'HOAN_THANH' ||
-          Boolean(incoming.questionnaire && (
-            incoming.questionnaire.muc1_has ||
-            incoming.questionnaire.muc2_has ||
-            incoming.questionnaire.muc3_has ||
-            incoming.questionnaire.muc4_has ||
-            incoming.questionnaire.muc5_has ||
-            incoming.questionnaire.muc6_has ||
-            incoming.questionnaire.muc7_has ||
-            incoming.questionnaire.muc1_rows?.length ||
-            incoming.questionnaire.muc2_cayTrongRows?.length ||
-            incoming.questionnaire.muc6_rows?.length
-          )) ||
-          Boolean(incoming.note?.trim());
-        if (!hasSurveyData) continue;
+        if (
+          !isCompletedSurveyStatus(incoming.surveyStatus) ||
+          !incoming.questionnaire ||
+          !hasCompletedSurveyContent(incoming.questionnaire)
+        ) {
+          skippedIncompleteCount++;
+          continue;
+        }
         const belongsToEntry = incoming.areaId === entry.area.id ||
           (incoming.areaCode === entry.area.code && (
             incoming.communeId === entry.commune.id ||
@@ -3699,23 +3722,19 @@ export default function App() {
         }
         const incomingTime = Date.parse(incoming.updatedAt || workPackage.exportedAt);
         const existingTime = Date.parse(existing.updatedAt || '');
-        if (Number.isFinite(existingTime) && Number.isFinite(incomingTime) && incomingTime < existingTime) {
+        if (
+          Number.isFinite(existingTime) &&
+          Number.isFinite(incomingTime) &&
+          incomingTime < existingTime &&
+          isCompletedSurveyStatus(existing.surveyStatus) &&
+          hasCompletedSurveyContent(existing.questionnaire)
+        ) {
           continue;
         }
-        const normalizedIncomingStatus: SurveyStatus | undefined =
-          incoming.surveyStatus === 'COMPLETED' || incoming.surveyStatus === 'HOAN_THANH'
-            ? 'DA_HOAN_THANH'
-            : incoming.surveyStatus === 'IN_PROGRESS'
-              ? 'DANG_NHAP'
-              : incoming.surveyStatus === 'PENDING'
-                ? 'CHUA_NHAP'
-                : incoming.surveyStatus;
-        const progressStatus = normalizedIncomingStatus &&
-          normalizedIncomingStatus !== 'CHUA_NHAP'
-          ? normalizedIncomingStatus
-          : hasSurveyData
-            ? 'DANG_NHAP'
-            : existing.surveyStatus;
+        const incomingStatus = String(incoming.surveyStatus || '').toUpperCase();
+        const progressStatus: SurveyStatus = incomingStatus === 'DA_DUYET'
+          ? 'DA_DUYET'
+          : 'DA_HOAN_THANH';
         nextHouseholds[householdIndex] = {
           ...existing,
           assignedSurveyorId: resolvedSurveyorId,
@@ -3730,13 +3749,16 @@ export default function App() {
         householdIndexById.set(incoming.id, householdIndex);
         householdIndexByCompositeKey.set(householdCompositeKey(existing), householdIndex);
         updatedCount++;
+        updatedEntryCount++;
       }
-      processedAreas.push({
-        area: localArea,
-        commune: localCommune,
-        surveyorId: resolvedSurveyorId,
-        surveyorName: resolvedSurveyorName
-      });
+      if (updatedEntryCount > 0) {
+        processedAreas.push({
+          area: localArea,
+          commune: localCommune,
+          surveyorId: resolvedSurveyorId,
+          surveyorName: resolvedSurveyorName
+        });
+      }
     }
 
     setHouseholds(nextHouseholds);
@@ -3780,7 +3802,8 @@ export default function App() {
       updatedCount,
       newCount: 0,
       areaCount: processedAreas.length,
-      progressSynced
+      progressSynced,
+      skippedCount: skippedIncompleteCount
     };
   };
 
@@ -3792,6 +3815,26 @@ export default function App() {
     const nextHouseholds = [...households];
     const householdIndexById = new Map(nextHouseholds.map((household, index) => [household.id, index]));
     const areasById = new Map(areas.map(area => [area.id, area]));
+    const householdIndexesByLocation = new Map<string, number[]>();
+    const addHouseholdLocation = (key: string, index: number) => {
+      const indexes = householdIndexesByLocation.get(key) || [];
+      indexes.push(index);
+      householdIndexesByLocation.set(key, indexes);
+    };
+    nextHouseholds.forEach((household, index) => {
+      const identifiers = [
+        household.communeCode && household.areaCode && household.sttMau
+          ? `${household.communeCode}_${household.areaCode}_${household.sttMau}`
+          : '',
+        household.communeId && household.areaCode && household.sttMau
+          ? `${household.communeId}_${household.areaCode}_${household.sttMau}`
+          : '',
+        household.areaId && household.sttMau
+          ? `${household.areaId}_${household.sttMau}`
+          : ''
+      ].filter(Boolean);
+      identifiers.forEach(identifier => addHouseholdLocation(identifier, index));
+    });
     const surveyorsByName = new Map<string, Surveyor[]>();
     surveyors.filter(surveyor => surveyor.role === 'SURVEYOR').forEach(surveyor => {
       const key = normalizeSurveyorName(surveyor.name);
@@ -3805,10 +3848,34 @@ export default function App() {
     let updatedCount = 0;
     let unmatchedCount = 0;
     let staleCount = 0;
+    let incompleteCount = 0;
+    let ambiguousCount = 0;
     const importedAt = new Date().toISOString();
 
     for (const entry of backup.entries) {
-      const householdIndex = householdIndexById.get(entry.id);
+      const status = String(entry.surveyStatus || '').toUpperCase();
+      if (!isCompletedSurveyStatus(status) || !hasCompletedSurveyContent(entry.questionnaire)) {
+        incompleteCount++;
+        continue;
+      }
+
+      let householdIndex = entry.id ? householdIndexById.get(entry.id) : undefined;
+      if (householdIndex === undefined && entry.areaCode && entry.sttMau) {
+        const locationKeys = [
+          entry.communeCode ? `${entry.communeCode}_${entry.areaCode}_${entry.sttMau}` : '',
+          entry.communeId ? `${entry.communeId}_${entry.areaCode}_${entry.sttMau}` : '',
+          entry.areaId ? `${entry.areaId}_${entry.sttMau}` : ''
+        ].filter(Boolean);
+        const matchingIndexes = Array.from(new Set(locationKeys.flatMap(key =>
+          householdIndexesByLocation.get(key) || []
+        )));
+        if (matchingIndexes.length === 1) {
+          householdIndex = matchingIndexes[0];
+        } else if (matchingIndexes.length > 1) {
+          ambiguousCount++;
+          continue;
+        }
+      }
       if (householdIndex === undefined) {
         unmatchedCount++;
         continue;
@@ -3825,53 +3892,65 @@ export default function App() {
       if (!area || !commune) {
         throw new Error(`Không xác định được địa bàn của hộ ${existing.sttMau || existing.id}; chưa nhập dữ liệu nào.`);
       }
+      const locationMismatch =
+        (entry.areaCode && entry.areaCode !== existing.areaCode) ||
+        (entry.communeCode && entry.communeCode !== existing.communeCode) ||
+        (entry.sttMau && entry.sttMau !== existing.sttMau);
+      if (locationMismatch) {
+        throw new Error(`Mã xã/địa bàn/số thứ tự trong file không khớp hộ ${existing.sttMau || existing.id}; chưa nhập dữ liệu nào.`);
+      }
 
       const assignedSurveyor = surveyors.find(surveyor =>
         surveyor.role === 'SURVEYOR' && surveyor.id === existing.assignedSurveyorId
       );
       const assignedName = normalizeSurveyorName(existing.assignedSurveyorName || '');
       const assignedNameMatches = assignedName ? surveyorsByName.get(assignedName) || [] : [];
-      const incomingNames = [entry.updatedBy, entry.questionnaire.surveyorName]
+      const incomingSurveyorById = entry.assignedSurveyorId
+        ? surveyors.find(surveyor =>
+          surveyor.role === 'SURVEYOR' && surveyor.id === entry.assignedSurveyorId
+        )
+        : undefined;
+      const incomingNames = [
+        entry.updatedBy,
+        entry.assignedSurveyorName,
+        entry.questionnaire.surveyorName
+      ]
         .filter((name): name is string => typeof name === 'string' && Boolean(name.trim()))
         .map(normalizeSurveyorName);
       const incomingSurveyors = Array.from(new Set(incomingNames.flatMap(name => surveyorsByName.get(name) || [])));
       const resolvedSurveyor = assignedSurveyor ||
         (assignedNameMatches.length === 1 ? assignedNameMatches[0] : undefined) ||
+        incomingSurveyorById ||
         (incomingSurveyors.length === 1 ? incomingSurveyors[0] : undefined);
       if (!resolvedSurveyor) {
         throw new Error(`Không xác định được ĐTV phụ trách hộ ${existing.sttMau || existing.id}; chưa nhập dữ liệu nào.`);
       }
       if (incomingSurveyors.length > 1 ||
         (incomingSurveyors.length === 1 && incomingSurveyors[0].id !== resolvedSurveyor.id) ||
+        (incomingSurveyorById && incomingSurveyorById.id !== resolvedSurveyor.id) ||
         (assignedNameMatches.length > 1 && !assignedSurveyor)) {
         throw new Error(`Tên ĐTV trong backup không khớp phân công của hộ ${existing.sttMau || existing.id}; chưa nhập dữ liệu nào.`);
       }
 
       const incomingTime = Date.parse(entry.updatedAt || importedAt);
       const existingTime = Date.parse(existing.updatedAt || '');
-      if (Number.isFinite(existingTime) && Number.isFinite(incomingTime) && incomingTime < existingTime) {
+      if (
+        Number.isFinite(existingTime) &&
+        Number.isFinite(incomingTime) &&
+        incomingTime < existingTime &&
+        isCompletedSurveyStatus(existing.surveyStatus) &&
+        hasCompletedSurveyContent(existing.questionnaire)
+      ) {
         staleCount++;
         continue;
       }
 
       const normalizedStatus: SurveyStatus | undefined =
-        entry.surveyStatus === 'COMPLETED' || entry.surveyStatus === 'HOAN_THANH'
+        status === 'COMPLETED' || status === 'HOAN_THANH'
           ? 'DA_HOAN_THANH'
-          : entry.surveyStatus === 'IN_PROGRESS'
-            ? 'DANG_NHAP'
-            : entry.surveyStatus === 'PENDING'
-              ? 'CHUA_NHAP'
-              : entry.surveyStatus;
-      const hasSurveyData = Object.entries(entry.questionnaire).some(([key, value]) =>
-        key.endsWith('_has') && value === true
-      ) || Object.values(entry.questionnaire).some(value =>
-        Array.isArray(value) && value.length > 0
-      );
-      const progressStatus = normalizedStatus && normalizedStatus !== 'CHUA_NHAP'
-        ? normalizedStatus
-        : hasSurveyData
-          ? 'DANG_NHAP'
-          : existing.surveyStatus;
+          : status === 'DA_DUYET'
+            ? 'DA_DUYET'
+            : 'DA_HOAN_THANH';
       nextHouseholds[householdIndex] = {
         ...existing,
         assignedSurveyorId: resolvedSurveyor.id,
@@ -3880,7 +3959,7 @@ export default function App() {
         ...(entry.membersCountEntered !== undefined ? { membersCountEntered: entry.membersCountEntered } : {}),
         ...(entry.workingMembersCount !== undefined ? { workingMembersCount: entry.workingMembersCount } : {}),
         questionnaire: { ...existing.questionnaire, ...entry.questionnaire },
-        surveyStatus: progressStatus,
+        surveyStatus: normalizedStatus,
         updatedAt: entry.updatedAt || importedAt,
         updatedBy: entry.updatedBy || resolvedSurveyor.name
       };
@@ -3890,9 +3969,10 @@ export default function App() {
 
     if (updatedCount === 0) {
       throw new Error(
-        unmatchedCount === backup.entries.length
-          ? `Không tìm thấy mã hộ nào trong bảng kê hiện tại (${unmatchedCount} phiếu không khớp). Hãy nạp đúng bảng kê gốc trước.`
-          : `Không có phiếu mới hơn để cập nhật (${staleCount} phiếu cũ, ${unmatchedCount} mã hộ không khớp).`
+        `Không có phiếu hoàn thành đủ nội dung để cập nhật. ` +
+        `${incompleteCount} phiếu chưa hoàn thành/thiếu nội dung, ` +
+        `${unmatchedCount} mã hộ không khớp, ${ambiguousCount} mã hộ không duy nhất, ` +
+        `${staleCount} phiếu cũ hơn dữ liệu máy Admin.`
       );
     }
 
@@ -3928,7 +4008,8 @@ export default function App() {
       updatedCount,
       newCount: 0,
       areaCount: processedAreas.size,
-      progressSynced
+      progressSynced,
+      skippedCount: incompleteCount + unmatchedCount + ambiguousCount + staleCount
     };
   };
 

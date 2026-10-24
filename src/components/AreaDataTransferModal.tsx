@@ -20,6 +20,14 @@ import {
 } from '../utils/areaDataTransfer';
 import { parseSurveyorEntryBackup } from '../utils/localDataBackup';
 
+function hasJsonRecords(value: unknown): boolean {
+  if (Array.isArray(value)) return true;
+  if (typeof value !== 'object' || value === null) return false;
+  return Object.values(value).every(item =>
+    typeof item === 'object' && item !== null && !Array.isArray(item)
+  );
+}
+
 interface AreaDataTransferModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -34,12 +42,14 @@ interface AreaDataTransferModalProps {
     newCount: number;
     areaCount: number;
     progressSynced: boolean;
+    skippedCount?: number;
   }>;
   onApplySurveyorBackup: (backup: ReturnType<typeof parseSurveyorEntryBackup>) => Promise<{
     updatedCount: number;
     newCount: number;
     areaCount: number;
     progressSynced: boolean;
+    skippedCount?: number;
   }>;
   showNotification: (type: 'success' | 'error', msg: string) => void;
   initialMode?: 'export' | 'import';
@@ -351,9 +361,18 @@ export default function AreaDataTransferModal({
     try {
       for (const { file, text } of importedFiles) {
         const parsed: unknown = JSON.parse(text);
+        const backupObject = typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)
+          ? parsed as Record<string, unknown>
+          : undefined;
         const isSurveyorBackup = Array.isArray(parsed) ||
-          (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) &&
-            'format' in parsed && parsed.format === 'tnh-entries-backup');
+          (backupObject?.type !== 'SURVEY_WORK_PACKAGE' && Boolean(
+            backupObject?.format === 'tnh-entries-backup' ||
+            ['entries', 'households', 'records', 'results', 'surveys', 'areas', 'surveyAreas', 'rosters']
+              .some(key => hasJsonRecords(backupObject?.[key])) ||
+            (typeof backupObject?.data === 'object' && backupObject.data !== null &&
+              ['entries', 'households', 'records', 'results', 'surveys', 'areas', 'surveyAreas', 'rosters']
+                .some(key => hasJsonRecords((backupObject.data as Record<string, unknown>)[key])))
+          ));
         if (currentUser.role === 'ADMIN' && isSurveyorBackup) {
           const backup = parseSurveyorEntryBackup(parsed);
           const counts = await onApplySurveyorBackup(backup);
@@ -363,7 +382,8 @@ export default function AreaDataTransferModal({
             newCount: counts.newCount,
             areaCount: counts.areaCount,
             success: counts.progressSynced,
-            message: `Đã cập nhật ${counts.updatedCount} phiếu từ ${counts.areaCount} địa bàn.` +
+            message: `Đã cập nhật ${counts.updatedCount} phiếu hoàn thành từ ${counts.areaCount} địa bàn.` +
+              (counts.skippedCount ? ` Bỏ qua ${counts.skippedCount} phiếu chưa đạt điều kiện hoặc không khớp.` : '') +
               (counts.progressSynced ? '' : ' Dữ liệu đã lưu cục bộ nhưng chưa đồng bộ số đếm tiến độ lên Firebase.')
           });
           continue;
@@ -378,14 +398,18 @@ export default function AreaDataTransferModal({
           );
         }
         const counts = await onApplyWorkPackage(workPackage);
+        const hasImportedRecords = counts.updatedCount + counts.newCount > 0;
         results.push({
           fileName: file.name,
           updatedCount: counts.updatedCount,
           newCount: counts.newCount,
           areaCount: counts.areaCount,
-          success: counts.progressSynced,
-          message: `Đã cập nhật ${counts.updatedCount} hộ, thêm ${counts.newCount} hộ từ ${counts.areaCount} địa bàn.` +
+          success: counts.progressSynced && hasImportedRecords,
+          message: hasImportedRecords
+            ? `Đã cập nhật ${counts.updatedCount} hộ, thêm ${counts.newCount} hộ từ ${counts.areaCount} địa bàn.` +
+            (counts.skippedCount ? ` Bỏ qua ${counts.skippedCount} phiếu chưa hoàn thành hoặc thiếu nội dung.` : '') +
             (counts.progressSynced ? '' : ' Dữ liệu đã lưu cục bộ nhưng chưa đồng bộ số đếm tiến độ lên Firebase.')
+            : 'Không có phiếu hoàn thành đủ nội dung để cập nhật.'
         });
       }
       setImportResults(results);
@@ -596,7 +620,7 @@ export default function AreaDataTransferModal({
                 </div>
                 <p className="text-[11px] leading-relaxed text-slate-600">
                   {canManageData
-                    ? 'Chọn gói kết quả do ĐTV xuất hoặc backup.json chỉ chứa danh sách phiếu. Ứng dụng ghép phiếu vào bảng kê theo mã hộ, cập nhật tiến độ lên Firebase và giữ nguyên bảng kê gốc.'
+                    ? 'Chọn gói kết quả, backup.json hoặc file JSON có danh sách hộ/phiếu. Chỉ phiếu có nội dung và trạng thái hoàn thành mới được ghép theo mã hộ, gắn xã/địa bàn/ĐTV từ bảng kê Admin và đồng bộ số đếm lên Firebase.'
                     : 'Chọn file phân công từ Admin. Ứng dụng chỉ nạp địa bàn dành cho tài khoản đang đăng nhập và lưu dữ liệu trên máy này.'
                   }
                 </p>
@@ -673,7 +697,7 @@ export default function AreaDataTransferModal({
               >
                 {isProcessingImport ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Database className="w-4 h-4" />}
                 <span>
-                  {canManageData ? 'NHẬP KẾT QUẢ VÀO MÁY ADMIN' : 'NẠP GÓI PHÂN CÔNG VÀO MÁY'}
+                  {canManageData ? 'CẬP NHẬT PHIẾU HOÀN THÀNH VÀO ADMIN' : 'NẠP GÓI PHÂN CÔNG VÀO MÁY'}
                 </span>
               </button>
             </div>
