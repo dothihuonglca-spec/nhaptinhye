@@ -18,6 +18,7 @@ import {
   normalizeSurveyorName,
   SurveyWorkPackage
 } from '../utils/areaDataTransfer';
+import { parseSurveyorEntryBackup } from '../utils/localDataBackup';
 
 interface AreaDataTransferModalProps {
   isOpen: boolean;
@@ -29,6 +30,12 @@ interface AreaDataTransferModalProps {
   areas: SurveyArea[];
   households: Household[];
   onApplyWorkPackage: (workPackage: SurveyWorkPackage) => Promise<{
+    updatedCount: number;
+    newCount: number;
+    areaCount: number;
+    progressSynced: boolean;
+  }>;
+  onApplySurveyorBackup: (backup: ReturnType<typeof parseSurveyorEntryBackup>) => Promise<{
     updatedCount: number;
     newCount: number;
     areaCount: number;
@@ -48,6 +55,7 @@ export default function AreaDataTransferModal({
   areas,
   households,
   onApplyWorkPackage,
+  onApplySurveyorBackup,
   showNotification,
   initialMode = 'export'
 }: AreaDataTransferModalProps) {
@@ -342,6 +350,24 @@ export default function AreaDataTransferModal({
 
     try {
       for (const { file, text } of importedFiles) {
+        const parsed: unknown = JSON.parse(text);
+        const isSurveyorBackup = Array.isArray(parsed) ||
+          (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) &&
+            'format' in parsed && parsed.format === 'tnh-entries-backup');
+        if (currentUser.role === 'ADMIN' && isSurveyorBackup) {
+          const backup = parseSurveyorEntryBackup(parsed);
+          const counts = await onApplySurveyorBackup(backup);
+          results.push({
+            fileName: file.name,
+            updatedCount: counts.updatedCount,
+            newCount: counts.newCount,
+            areaCount: counts.areaCount,
+            success: counts.progressSynced,
+            message: `Đã cập nhật ${counts.updatedCount} phiếu từ ${counts.areaCount} địa bàn.` +
+              (counts.progressSynced ? '' : ' Dữ liệu đã lưu cục bộ nhưng chưa đồng bộ số đếm tiến độ lên Firebase.')
+          });
+          continue;
+        }
         const workPackage = parseSurveyWorkPackage(text);
         const expectedPurpose = currentUser.role === 'SURVEYOR' ? 'ASSIGNMENT' : 'RESULTS';
         if (workPackage.purpose !== expectedPurpose) {
@@ -570,7 +596,7 @@ export default function AreaDataTransferModal({
                 </div>
                 <p className="text-[11px] leading-relaxed text-slate-600">
                   {canManageData
-                    ? 'Chọn file kết quả do ĐTV xuất. Ứng dụng chỉ cập nhật nội dung phiếu và trạng thái, giữ nguyên bảng kê/phân công gốc trên máy Admin.'
+                    ? 'Chọn gói kết quả do ĐTV xuất hoặc backup.json chỉ chứa danh sách phiếu. Ứng dụng ghép phiếu vào bảng kê theo mã hộ, cập nhật tiến độ lên Firebase và giữ nguyên bảng kê gốc.'
                     : 'Chọn file phân công từ Admin. Ứng dụng chỉ nạp địa bàn dành cho tài khoản đang đăng nhập và lưu dữ liệu trên máy này.'
                   }
                 </p>

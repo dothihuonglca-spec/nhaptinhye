@@ -63,6 +63,7 @@ import {
   saveLocalDataSnapshot,
   serializeLocalDataBackup
 } from './utils/localDataBackup';
+import type { SurveyorEntryBackup } from './utils/localDataBackup';
 
 // Tài khoản Quản trị viên Master thực tế + 58 cán bộ chính thức theo danh sách chuẩn từ ảnh
 export const DEFAULT_SURVEYORS: Surveyor[] = [
@@ -3779,6 +3780,154 @@ export default function App() {
       updatedCount,
       newCount: 0,
       areaCount: processedAreas.length,
+      progressSynced
+    };
+  };
+
+  const handleApplySurveyorBackup = async (backup: SurveyorEntryBackup) => {
+    if (currentUser.role !== 'ADMIN') {
+      throw new Error('Chỉ Admin mới được nhập file backup phiếu ĐTV để cập nhật tiến độ.');
+    }
+
+    const nextHouseholds = [...households];
+    const householdIndexById = new Map(nextHouseholds.map((household, index) => [household.id, index]));
+    const areasById = new Map(areas.map(area => [area.id, area]));
+    const surveyorsByName = new Map<string, Surveyor[]>();
+    surveyors.filter(surveyor => surveyor.role === 'SURVEYOR').forEach(surveyor => {
+      const key = normalizeSurveyorName(surveyor.name);
+      surveyorsByName.set(key, [...(surveyorsByName.get(key) || []), surveyor]);
+    });
+    const processedAreas = new Map<string, {
+      area: SurveyArea;
+      commune: Commune;
+      surveyor: Surveyor;
+    }>();
+    let updatedCount = 0;
+    let unmatchedCount = 0;
+    let staleCount = 0;
+    const importedAt = new Date().toISOString();
+
+    for (const entry of backup.entries) {
+      const householdIndex = householdIndexById.get(entry.id);
+      if (householdIndex === undefined) {
+        unmatchedCount++;
+        continue;
+      }
+      const existing = nextHouseholds[householdIndex];
+      const area = areasById.get(existing.areaId) ||
+        areas.find(item =>
+          item.code === existing.areaCode &&
+          (item.communeId === existing.communeId || item.communeCode === existing.communeCode)
+        );
+      const commune = communes.find(item =>
+        item.id === existing.communeId || item.communeCode === existing.communeCode
+      );
+      if (!area || !commune) {
+        throw new Error(`Không xác định được địa bàn của hộ ${existing.sttMau || existing.id}; chưa nhập dữ liệu nào.`);
+      }
+
+      const assignedSurveyor = surveyors.find(surveyor =>
+        surveyor.role === 'SURVEYOR' && surveyor.id === existing.assignedSurveyorId
+      );
+      const assignedName = normalizeSurveyorName(existing.assignedSurveyorName || '');
+      const assignedNameMatches = assignedName ? surveyorsByName.get(assignedName) || [] : [];
+      const incomingNames = [entry.updatedBy, entry.questionnaire.surveyorName]
+        .filter((name): name is string => typeof name === 'string' && Boolean(name.trim()))
+        .map(normalizeSurveyorName);
+      const incomingSurveyors = Array.from(new Set(incomingNames.flatMap(name => surveyorsByName.get(name) || [])));
+      const resolvedSurveyor = assignedSurveyor ||
+        (assignedNameMatches.length === 1 ? assignedNameMatches[0] : undefined) ||
+        (incomingSurveyors.length === 1 ? incomingSurveyors[0] : undefined);
+      if (!resolvedSurveyor) {
+        throw new Error(`Không xác định được ĐTV phụ trách hộ ${existing.sttMau || existing.id}; chưa nhập dữ liệu nào.`);
+      }
+      if (incomingSurveyors.length > 1 ||
+        (incomingSurveyors.length === 1 && incomingSurveyors[0].id !== resolvedSurveyor.id) ||
+        (assignedNameMatches.length > 1 && !assignedSurveyor)) {
+        throw new Error(`Tên ĐTV trong backup không khớp phân công của hộ ${existing.sttMau || existing.id}; chưa nhập dữ liệu nào.`);
+      }
+
+      const incomingTime = Date.parse(entry.updatedAt || importedAt);
+      const existingTime = Date.parse(existing.updatedAt || '');
+      if (Number.isFinite(existingTime) && Number.isFinite(incomingTime) && incomingTime < existingTime) {
+        staleCount++;
+        continue;
+      }
+
+      const normalizedStatus: SurveyStatus | undefined =
+        entry.surveyStatus === 'COMPLETED' || entry.surveyStatus === 'HOAN_THANH'
+          ? 'DA_HOAN_THANH'
+          : entry.surveyStatus === 'IN_PROGRESS'
+            ? 'DANG_NHAP'
+            : entry.surveyStatus === 'PENDING'
+              ? 'CHUA_NHAP'
+              : entry.surveyStatus;
+      const hasSurveyData = Object.entries(entry.questionnaire).some(([key, value]) =>
+        key.endsWith('_has') && value === true
+      ) || Object.values(entry.questionnaire).some(value =>
+        Array.isArray(value) && value.length > 0
+      );
+      const progressStatus = normalizedStatus && normalizedStatus !== 'CHUA_NHAP'
+        ? normalizedStatus
+        : hasSurveyData
+          ? 'DANG_NHAP'
+          : existing.surveyStatus;
+      nextHouseholds[householdIndex] = {
+        ...existing,
+        assignedSurveyorId: resolvedSurveyor.id,
+        assignedSurveyorName: resolvedSurveyor.name,
+        ...(entry.membersCount !== undefined ? { membersCount: entry.membersCount } : {}),
+        ...(entry.membersCountEntered !== undefined ? { membersCountEntered: entry.membersCountEntered } : {}),
+        ...(entry.workingMembersCount !== undefined ? { workingMembersCount: entry.workingMembersCount } : {}),
+        questionnaire: { ...existing.questionnaire, ...entry.questionnaire },
+        surveyStatus: progressStatus,
+        updatedAt: entry.updatedAt || importedAt,
+        updatedBy: entry.updatedBy || resolvedSurveyor.name
+      };
+      processedAreas.set(`${resolvedSurveyor.id}:${area.id}`, { area, commune, surveyor: resolvedSurveyor });
+      updatedCount++;
+    }
+
+    if (updatedCount === 0) {
+      throw new Error(
+        unmatchedCount === backup.entries.length
+          ? `Không tìm thấy mã hộ nào trong bảng kê hiện tại (${unmatchedCount} phiếu không khớp). Hãy nạp đúng bảng kê gốc trước.`
+          : `Không có phiếu mới hơn để cập nhật (${staleCount} phiếu cũ, ${unmatchedCount} mã hộ không khớp).`
+      );
+    }
+
+    await saveLocalDataSnapshot({ communes, areas, households: nextHouseholds, surveyors, departments });
+    setHouseholds(nextHouseholds);
+    const snapshots = Array.from(processedAreas.values()).map(({ area, commune, surveyor }) =>
+      createAreaProgressSnapshot(
+        surveyor.id,
+        surveyor.name,
+        area,
+        commune,
+        nextHouseholds.filter(household =>
+          (household.areaId === area.id ||
+            (household.areaCode === area.code &&
+              (household.communeId === commune.id || household.communeCode === commune.communeCode))) &&
+          (household.assignedSurveyorId
+            ? household.assignedSurveyorId === surveyor.id
+            : normalizeSurveyorName(household.assignedSurveyorName || '') === normalizeSurveyorName(surveyor.name))
+        )
+      )
+    );
+
+    let progressSynced = true;
+    try {
+      await Promise.all(snapshots.map(snapshot =>
+        setDoc(doc(db, 'areaProgress', snapshot.id), snapshot)
+      ));
+    } catch (err) {
+      console.error('Không thể đồng bộ số đếm tiến độ lên Firebase:', err);
+      progressSynced = false;
+    }
+    return {
+      updatedCount,
+      newCount: 0,
+      areaCount: processedAreas.size,
       progressSynced
     };
   };
@@ -8419,6 +8568,7 @@ export default function App() {
           areas={areas}
           households={households}
           onApplyWorkPackage={handleApplyWorkPackage}
+          onApplySurveyorBackup={handleApplySurveyorBackup}
           showNotification={showNotification}
           initialMode={dataTransferMode}
         />
