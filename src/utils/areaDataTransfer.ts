@@ -301,11 +301,13 @@ export function createAreaProgressSnapshot(
   commune: Commune,
   households: Household[]
 ): AreaProgressSnapshot {
+  const areaCode = area.code.trim();
+  const communeCode = (commune.communeCode || commune.id).trim();
   const areaHouseholds = households
     .filter(h => {
-      if (h.areaCode.trim() !== area.code.trim()) return false;
+      if (h.areaCode.trim() !== areaCode) return false;
       if (h.communeCode && commune.communeCode) {
-        return h.communeCode.trim() === commune.communeCode.trim();
+        return h.communeCode.trim() === communeCode;
       }
       return h.communeId === commune.id;
     })
@@ -319,14 +321,14 @@ export function createAreaProgressSnapshot(
   ).length;
 
   return {
-    id: `${encodeURIComponent(surveyorId)}_${encodeURIComponent(`${commune.communeCode || commune.id}_${area.code}`)}`,
+    id: `${encodeURIComponent(surveyorId)}_${encodeURIComponent(`${communeCode}_${areaCode}`)}`,
     surveyorId,
     surveyorName,
     areaId: area.id,
     communeId: commune.id,
     communeCode: commune.communeCode,
     communeName: commune.communeName,
-    areaCode: area.code,
+    areaCode,
     areaName: area.name,
     totalHouseholds: areaHouseholds.length,
     completedHouseholds,

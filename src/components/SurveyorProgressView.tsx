@@ -227,9 +227,10 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
     const uniqueAreas = new Map<string, SurveyArea>();
     effectiveAreas.forEach(area => {
       const commune = communeMap.get(area.communeId) || communeMap.get((area as any).communeCode);
-      const communeCode = commune?.communeCode || area.communeCode;
-      const key = communeCode && area.code
-        ? `${communeCode.trim()}_${area.code.trim()}`
+      const communeCode = (commune?.communeCode || area.communeCode || '').trim();
+      const areaCode = area.code.trim();
+      const key = communeCode && areaCode
+        ? `${communeCode}_${areaCode}`
         : area.id;
       if (!uniqueAreas.has(key)) uniqueAreas.set(key, area);
     });
@@ -246,8 +247,8 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
       }
       if (h.areaCode) {
         const householdCommune = communeMap.get(h.communeId) || communeMap.get(h.communeCode || '');
-        const communeCode = householdCommune?.communeCode || h.communeCode || h.communeId || 'default';
-        const cKey = `${communeCode}_${h.areaCode}`;
+        const communeCode = (householdCommune?.communeCode || h.communeCode || h.communeId || 'default').trim();
+        const cKey = `${communeCode}_${h.areaCode.trim()}`;
         if (!hhByCommuneAndAreaCode.has(cKey)) hhByCommuneAndAreaCode.set(cKey, []);
         hhByCommuneAndAreaCode.get(cKey)!.push(h);
       }
@@ -255,9 +256,10 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
 
     return effectiveAreas.map(area => {
       const commune = communeMap.get(area.communeId) || communeMap.get((area as any).communeCode);
-      const communeCode = commune?.communeCode || area.communeCode;
+      const communeCode = (commune?.communeCode || area.communeCode || '').trim();
+      const areaCode = area.code.trim();
       
-      const cKey = `${communeCode || area.communeId || 'default'}_${area.code}`;
+      const cKey = `${communeCode || area.communeId || 'default'}_${areaCode}`;
       let allAreaHHs = hhByCommuneAndAreaCode.get(cKey) || [];
 
       if (allAreaHHs.length === 0 && !communeCode) {
@@ -308,7 +310,7 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
       cloudProgress
         .filter(item => {
           if (communeCode && item.communeCode && item.areaCode) {
-            return item.communeCode.trim() === communeCode.trim() && item.areaCode.trim() === area.code.trim();
+            return item.communeCode.trim() === communeCode && item.areaCode.trim() === areaCode;
           }
           return item.areaId === area.id;
         })
