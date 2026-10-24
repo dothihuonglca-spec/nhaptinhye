@@ -18,6 +18,7 @@ import {
   Building, Phone, ArrowUpRight, X, LayoutGrid, ListTree, Upload
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import CloudReconcilePanel, { type CloudStatus } from './CloudReconcilePanel';
 
 interface SurveyorProgressViewProps {
   surveyors: Surveyor[];
@@ -26,6 +27,9 @@ interface SurveyorProgressViewProps {
   communes: Commune[];
   currentUser: Surveyor;
   cloudProgress: AreaProgressSnapshot[];
+  cloudStatus: CloudStatus;
+  onReloadCloud: () => void;
+  onOpenImportTab?: () => void;
   onOpenHouseholdForm?: (household: Household) => void;
   onNavigateToHouseholdEntry?: (surveyorNameOrId: string, areaId?: string, communeId?: string) => void;
   onOpenDataTransfer?: () => void;
@@ -79,6 +83,9 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
   communes,
   currentUser,
   cloudProgress,
+  cloudStatus,
+  onReloadCloud,
+  onOpenImportTab,
   onOpenHouseholdForm,
   onNavigateToHouseholdEntry,
   onOpenDataTransfer,
@@ -848,6 +855,22 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
   return (
     <div className="flex flex-col gap-4 w-full pb-10">
       
+      {/* ĐỐI CHIẾU FIREBASE ↔ MÁY ADMIN: địa bàn nào đã có trên Firebase nhưng chưa có trên máy */}
+      {currentUser.role !== 'SURVEYOR' && (
+        <CloudReconcilePanel
+          cloudProgress={cloudProgress}
+          cloudStatus={cloudStatus}
+          onReloadCloud={onReloadCloud}
+          communes={communes as any}
+          areas={areas as any}
+          households={households as any}
+          surveyors={surveyors}
+          onOpenJsonImport={onOpenDataTransfer}
+          onOpenImportTab={currentUser.role === 'ADMIN' ? onOpenImportTab : undefined}
+          showNotification={showNotification}
+        />
+      )}
+
       {/* BANNER & KPI CARDS */}
       <div className="bg-white rounded-lg border border-slate-300 shadow-sm p-4 flex flex-col gap-3">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-200 pb-3">
@@ -867,10 +890,10 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
                 type="button"
                 onClick={onOpenDataTransfer}
                 className="px-3.5 py-1.5 bg-sky-800 hover:bg-sky-700 text-white rounded font-bold text-xs flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
-                title="Nhập file kết quả JSON của ĐTV hoặc xuất gói phân công"
+                title="Mở tab Xuất nhập dữ liệu để nạp JSON của ĐTV hoặc xuất gói phân công"
               >
                 <Upload className="w-4 h-4" />
-                <span>Giao nhận JSON ĐTV</span>
+                <span>Xuất nhập dữ liệu</span>
               </button>
             )}
             <button
