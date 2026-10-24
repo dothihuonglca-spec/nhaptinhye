@@ -574,6 +574,80 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
     }
   };
 
+  const handleExportProgressNotice = () => {
+    if (!progressNotice) return;
+    try {
+      const wb = XLSX.utils.book_new();
+      const isAreaNotice = progressNotice.type === 'areas' || progressNotice.type === 'completedAreas';
+      const wsData: (string | number)[][] = isAreaNotice
+        ? [
+            [progressNotice.title],
+            [`Ngày xuất: ${new Date().toLocaleString('vi-VN')}`],
+            [],
+            ['Mã TKCS', 'Tên TKCS', 'Mã xã', 'Tên xã', 'Mã địa bàn', 'Tên địa bàn', 'ĐTV', 'Tổng số hộ', 'Đã nhập', 'Chưa nhập', 'Tiến độ (%)'],
+            ...progressNoticeAreas.map(item => [
+              item.tkcsCode,
+              item.tkcsName,
+              item.communeCode,
+              item.communeName,
+              item.areaCode,
+              item.areaName,
+              item.assignedSurveyorName,
+              item.totalHouseholds,
+              item.completedHouseholds,
+              item.unenteredHouseholds,
+              item.completionRate
+            ])
+          ]
+        : [
+            [progressNotice.title],
+            [`Ngày xuất: ${new Date().toLocaleString('vi-VN')}`],
+            [],
+            ['Mã xã', 'Tên xã', 'Mã địa bàn', 'Tên địa bàn', 'STT mẫu', 'Chủ hộ', 'ĐTV', 'Trạng thái', 'Cập nhật'],
+            ...progressNoticeHouseholds.map(({ household, area }) => {
+              const isComplete = [
+                'DA_HOAN_THANH',
+                'DA_DUYET',
+                'COMPLETED',
+                'HOAN_THANH'
+              ].includes(household.surveyStatus || '');
+              const isInProgress =
+                household.surveyStatus === 'DANG_NHAP' ||
+                household.surveyStatus === 'IN_PROGRESS';
+              const statusLabel = household.surveyStatus === 'DA_DUYET'
+                ? 'Đã duyệt'
+                : isComplete
+                  ? 'Đã hoàn thành'
+                  : isInProgress
+                    ? 'Đang nhập'
+                    : 'Chưa nhập';
+              return [
+                household.communeCode || area.communeCode,
+                household.communeName || area.communeName,
+                area.areaCode,
+                area.areaName,
+                household.sttMau,
+                household.householdHead,
+                household.assignedSurveyorName || area.assignedSurveyorName,
+                statusLabel,
+                household.updatedAt ? new Date(household.updatedAt).toLocaleString('vi-VN') : ''
+              ];
+            })
+          ];
+      const worksheet = XLSX.utils.aoa_to_sheet(wsData);
+      XLSX.utils.book_append_sheet(wb, worksheet, 'DanhSach');
+      const filename = progressNotice.title
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^a-zA-Z0-9]+/g, '_')
+        .replace(/^_|_$/g, '');
+      XLSX.writeFile(wb, `${filename || 'Tien_Do'}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+      showNotification('success', `Đã xuất Excel: ${progressNotice.title}.`);
+    } catch (e: any) {
+      showNotification('error', 'Lỗi xuất Excel: ' + e.message);
+    }
+  };
+
   return (
     <div className="flex flex-col gap-4 w-full pb-10">
       
@@ -1216,14 +1290,27 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
                     : `${progressNoticeHouseholds.length} hộ có thông tin chi tiết trên máy này`}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={() => setProgressNotice(null)}
-                className="text-white hover:bg-[#047484] p-1.5 rounded cursor-pointer transition-colors"
-                aria-label="Đóng danh sách tiến độ"
-              >
-                <X className="w-4 h-4" />
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleExportProgressNotice}
+                  disabled={progressNotice.type === 'areas' || progressNotice.type === 'completedAreas'
+                    ? progressNoticeAreas.length === 0
+                    : progressNoticeHouseholds.length === 0}
+                  className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-800/50 disabled:cursor-not-allowed text-white rounded font-bold text-[11px] flex items-center gap-1.5 cursor-pointer transition-colors"
+                >
+                  <FileSpreadsheet className="w-3.5 h-3.5" />
+                  <span>Xuất Excel</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setProgressNotice(null)}
+                  className="text-white hover:bg-[#047484] p-1.5 rounded cursor-pointer transition-colors"
+                  aria-label="Đóng danh sách tiến độ"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
             </div>
 
             <div className="p-3.5 overflow-auto flex-1">
