@@ -28,6 +28,7 @@ import { ReplaceHouseholdModal } from './components/ReplaceHouseholdModal';
 import IndustrialSurveyModule from './components/IndustrialSurveyModule';
 import AreaDataTransferModal from './components/AreaDataTransferModal';
 import DataExchangeView, { type ExchangeAction } from './components/DataExchangeView';
+import MyProgressView, { MyProgressStrip } from './components/MyProgressView';
 import type { CloudStatus } from './components/CloudReconcilePanel';
 import { IndustrialSurveyPage } from './modules/industrialSurvey';
 import bannerImg from './assets/images/background-ngoai-troi-dep_042633251.jpg';
@@ -56,7 +57,14 @@ import {
   normalizeSurveyorName,
   selectOfficialHouseholds,
   SurveyWorkPackage,
-  isAreaAssigned
+  isAreaAssigned,
+  isReplacementHousehold,
+  isReplacedSampleStatus,
+  isOfficialSampleStatus,
+  parseReplacementNote,
+  sameHouseholdName,
+  findHouseholdBySourceKey,
+  markOriginalAsReplaced
 } from './utils/areaDataTransfer';
 import {
   loadPreRestoreSnapshot,
@@ -197,7 +205,7 @@ export default function App() {
     return 'household'; // Mặc định mở Trang Quản lý Thống kê Thu nhập Hộ gia đình
   });
 
-  const [activeTab, setActiveTab] = useState<'industrial_survey' | 'import' | 'entry' | 'surveyor_progress' | 'tnh' | 'macro_control' | 'database' | 'catalog' | 'surveyors' | 'data_exchange'>('entry');
+  const [activeTab, setActiveTab] = useState<'industrial_survey' | 'import' | 'entry' | 'surveyor_progress' | 'tnh' | 'macro_control' | 'database' | 'catalog' | 'surveyors' | 'data_exchange' | 'my_progress'>('entry');
   
   const [communes, setCommunes] = useState<Commune[]>(() => {
     try {
@@ -3747,6 +3755,9 @@ export default function App() {
     }>();
     let updatedCount = 0;
     let skippedIncompleteCount = 0;
+    let addedReplacementCount = 0;
+    let markedReplacedCount = 0;
+    let updatedStructureCount = 0;
     const userDepartment = departments.find(department =>
       department.id === currentUser.departmentId || department.name === currentUser.department
     );
@@ -3806,6 +3817,100 @@ export default function App() {
         }
       }
       let updatedEntryCount = 0;
+      let structureChanged = false;
+      const isInLocalArea = (household: Household) =>
+        household.areaId === localArea.id ||
+        (household.areaCode === localArea.code && (
+          household.communeId === localCommune.id ||
+          household.communeCode === localCommune.communeCode
+        ));
+      const incomingBelongsToEntry = (incoming: Household) =>
+        incoming.areaId === entry.area.id ||
+        (incoming.areaCode === entry.area.code && (
+          incoming.communeId === entry.commune.id ||
+          incoming.communeCode === entry.commune.communeCode
+        ));
+      // Khớp hộ: mã hộ -> (STT gốc + tên chủ hộ) -> STT mẫu. Hộ thay thế KHÔNG khớp theo STT mẫu
+      // vì nó có thể mang lại STT mẫu của hộ bị thay (sẽ ghi đè nhầm lên hộ mẫu gốc).
+      const findIncomingIndex = (incoming: Household): number => {
+        const byId = householdIndexById.get(incoming.id);
+        if (byId !== undefined) return byId;
+        const bySource = findHouseholdBySourceKey(nextHouseholds, isInLocalArea, incoming.sttGoc, incoming.householdHead);
+        if (bySource >= 0) return bySource;
+        if (isReplacementHousehold(incoming) || isReplacedSampleStatus(incoming.sampleStatus)) return -1;
+        return householdIndexByCompositeKey.get(householdCompositeKey(incoming)) ?? -1;
+      };
+
+      // BƯỚC 1: đồng bộ cấu trúc mẫu - hộ dự phòng đã thay vào + hộ mẫu cũ bị thay
+      // (làm cả khi hộ thay thế chưa nhập xong phiếu).
+      for (const incoming of entry.households) {
+        const isReplacement = isReplacementHousehold(incoming);
+        const isReplaced = isReplacedSampleStatus(incoming.sampleStatus);
+        if ((!isReplacement && !isReplaced) || !incomingBelongsToEntry(incoming)) continue;
+        const stamp = incoming.updatedAt || workPackage.exportedAt;
+        const foundIndex = findIncomingIndex(incoming);
+
+        if (isReplacement) {
+          let replacementIndex = foundIndex;
+          if (foundIndex >= 0) {
+            const current = nextHouseholds[foundIndex];
+            const wasOfficial = isOfficialSampleStatus(current.sampleStatus);
+            nextHouseholds[foundIndex] = {
+              ...current,
+              sampleStatus: 'CHÍNH THỨC',
+              sttMau: incoming.sttMau || current.sttMau,
+              householdHead: incoming.householdHead || current.householdHead,
+              address: incoming.address || current.address,
+              phone: incoming.phone || current.phone,
+              membersCount: incoming.membersCount ?? current.membersCount,
+              workingMembersCount: incoming.workingMembersCount ?? current.workingMembersCount,
+              sectorCode: incoming.sectorCode || current.sectorCode,
+              sectorName: incoming.sectorName || current.sectorName,
+              note: incoming.note || current.note,
+              assignedSurveyorId: resolvedSurveyorId,
+              assignedSurveyorName: resolvedSurveyorName
+            };
+            if (!wasOfficial) updatedStructureCount++;
+          } else {
+            // Hộ thay thế do ĐTV tự thêm (chưa có trong bảng kê Admin) -> thêm mới vào địa bàn
+            const created: Household = {
+              ...incoming,
+              communeId: localCommune.id,
+              communeCode: localCommune.communeCode,
+              communeName: incoming.communeName || localCommune.communeName,
+              areaId: localArea.id,
+              areaCode: localArea.code,
+              sampleStatus: 'CHÍNH THỨC',
+              assignedSurveyorId: resolvedSurveyorId,
+              assignedSurveyorName: resolvedSurveyorName,
+              surveyStatus: 'CHUA_NHAP',
+              questionnaire: undefined
+            };
+            nextHouseholds.push(created);
+            replacementIndex = nextHouseholds.length - 1;
+            householdIndexById.set(created.id, replacementIndex);
+            addedReplacementCount++;
+          }
+          structureChanged = true;
+          if (markOriginalAsReplaced(nextHouseholds, isInLocalArea, nextHouseholds[replacementIndex], stamp) >= 0) {
+            markedReplacedCount++;
+          }
+        } else if (foundIndex >= 0) {
+          const current = nextHouseholds[foundIndex];
+          if (!isReplacedSampleStatus(current.sampleStatus)) {
+            nextHouseholds[foundIndex] = {
+              ...current,
+              sampleStatus: 'ĐÃ THAY THẾ',
+              note: incoming.note && incoming.note.length >= (current.note || '').length ? incoming.note : current.note,
+              updatedAt: stamp
+            };
+            markedReplacedCount++;
+            structureChanged = true;
+          }
+        }
+      }
+
+      // BƯỚC 2: nạp phiếu hoàn thành
       for (const incoming of entry.households) {
         if (
           !isCompletedSurveyStatus(incoming.surveyStatus) ||
@@ -3824,9 +3929,7 @@ export default function App() {
           throw new Error(`Hộ ${incoming.sttMau || incoming.id} không thuộc địa bàn ${entry.area.code} trong gói kết quả.`);
         }
 
-        const householdIndex = householdIndexById.get(incoming.id) ??
-          householdIndexByCompositeKey.get(householdCompositeKey(incoming)) ??
-          -1;
+        const householdIndex = findIncomingIndex(incoming);
         if (householdIndex < 0) {
           throw new Error(`Không khớp được hộ ${incoming.sttMau || incoming.id} trong bảng kê địa bàn ${localArea.code}.`);
         }
@@ -3882,7 +3985,7 @@ export default function App() {
         updatedCount++;
         updatedEntryCount++;
       }
-      if (updatedEntryCount > 0) {
+      if (updatedEntryCount > 0 || structureChanged) {
         const areaKey = getAreaProgressKey(localCommune.communeCode, localArea.code);
         processedAreas.set(`${resolvedSurveyorId}:${areaKey}`, {
           area: localArea,
@@ -3927,7 +4030,8 @@ export default function App() {
     }
     return {
       updatedCount,
-      newCount: 0,
+      newCount: addedReplacementCount,
+      replacedCount: markedReplacedCount + updatedStructureCount,
       areaCount: new Set(Array.from(processedAreas.values(), item =>
         getAreaProgressKey(item.commune.communeCode, item.area.code)
       )).size,
@@ -3971,6 +4075,111 @@ export default function App() {
       indexes.push(index);
       householdIndexesByAreaAndHead.set(key, indexes);
     };
+    // ---- Đồng bộ hộ thay thế (hộ dự phòng thành chính thức / hộ mẫu cũ bị thay) TRƯỚC khi lập chỉ mục ----
+    let addedReplacementCount = 0;
+    let replacementChangeCount = 0;
+    const structureAreas = new Map<string, { area: SurveyArea; commune: Commune; surveyor?: Surveyor }>();
+    const communeCodeOf = (household: Household) =>
+      (household.communeCode || communesById.get(household.communeId)?.communeCode || '').trim();
+    for (const entry of backup.entries) {
+      const entryIsReplacement = isOfficialSampleStatus(entry.sampleStatus) && Boolean(parseReplacementNote(entry.note));
+      const entryIsReplaced = isReplacedSampleStatus(entry.sampleStatus);
+      if (!entryIsReplacement && !entryIsReplaced) continue;
+      const entryCommuneCode = (entry.communeCode || '').trim();
+      const entryAreaCode = entry.areaCode ? normalizeAreaCode(entry.areaCode) : '';
+      if (!entryCommuneCode || !entryAreaCode) continue;
+      const isInEntryArea = (household: Household) =>
+        communeCodeOf(household) === entryCommuneCode && normalizeAreaCode(household.areaCode || '') === entryAreaCode;
+      const commune = communesByCode.get(entryCommuneCode);
+      const area = areas.find(item =>
+        normalizeAreaCode(item.code) === entryAreaCode &&
+        (item.communeCode === entryCommuneCode || (commune && item.communeId === commune.id))
+      );
+      if (!commune || !area) continue;
+      const stamp = entry.updatedAt || new Date().toISOString();
+      const byId = entry.id ? householdIndexById.get(entry.id) : undefined;
+      let foundIndex = byId !== undefined
+        ? byId
+        : findHouseholdBySourceKey(nextHouseholds, isInEntryArea, entry.sttGoc, entry.householdHead);
+      if (foundIndex < 0 && entry.householdHead?.trim()) {
+        const sameHead = nextHouseholds
+          .map((household, index) => ({ household, index }))
+          .filter(({ household }) => isInEntryArea(household) && sameHouseholdName(household.householdHead, entry.householdHead));
+        if (sameHead.length === 1) foundIndex = sameHead[0].index;
+      }
+      const byIdSurveyor = entry.assignedSurveyorId
+        ? surveyors.find(item => item.role === 'SURVEYOR' && item.id === entry.assignedSurveyorId)
+        : undefined;
+      const namedSurveyors = surveyors.filter(item =>
+        item.role === 'SURVEYOR' &&
+        normalizeSurveyorName(item.name) === normalizeSurveyorName(entry.assignedSurveyorName || entry.updatedBy || '')
+      );
+      const entrySurveyor = byIdSurveyor || (namedSurveyors.length === 1 ? namedSurveyors[0] : undefined);
+
+      if (entryIsReplacement) {
+        let replacementIndex = foundIndex;
+        if (foundIndex >= 0) {
+          const current = nextHouseholds[foundIndex];
+          const wasOfficial = isOfficialSampleStatus(current.sampleStatus);
+          nextHouseholds[foundIndex] = {
+            ...current,
+            sampleStatus: 'CHÍNH THỨC',
+            sttMau: entry.sttMau || current.sttMau,
+            householdHead: entry.householdHead || current.householdHead,
+            address: entry.address || current.address,
+            phone: entry.phone || current.phone,
+            note: entry.note || current.note,
+            ...(entrySurveyor && !current.assignedSurveyorId
+              ? { assignedSurveyorId: entrySurveyor.id, assignedSurveyorName: entrySurveyor.name }
+              : {})
+          };
+          if (!wasOfficial) replacementChangeCount++;
+        } else {
+          const created: Household = {
+            id: entry.id || `hh-${commune.id}-${area.code}-${Date.now()}-${nextHouseholds.length}`,
+            communeId: commune.id,
+            communeCode: commune.communeCode,
+            communeName: entry.communeName || commune.communeName,
+            tkcsCode: entry.tkcsCode || commune.tkcsCode || '',
+            tkcsName: entry.tkcsName || commune.tkcsName || '',
+            areaId: area.id,
+            areaCode: area.code,
+            areaName: entry.areaName || area.name,
+            sttMau: entry.sttMau || 'DP',
+            sampleStatus: 'CHÍNH THỨC',
+            sttGoc: entry.sttGoc || '',
+            householdHead: entry.householdHead || '',
+            address: entry.address || '',
+            phone: entry.phone || '',
+            membersCount: entry.membersCount ?? 0,
+            workingMembersCount: entry.workingMembersCount ?? 0,
+            membersCountEntered: entry.membersCountEntered,
+            sectorCode: entry.sectorCode || 2,
+            sectorName: entry.sectorName || '',
+            note: entry.note || '',
+            surveyStatus: 'CHUA_NHAP',
+            assignedSurveyorId: entrySurveyor?.id,
+            assignedSurveyorName: entrySurveyor?.name
+          };
+          nextHouseholds.push(created);
+          replacementIndex = nextHouseholds.length - 1;
+          householdIndexById.set(created.id, replacementIndex);
+          addedReplacementCount++;
+        }
+        if (markOriginalAsReplaced(nextHouseholds, isInEntryArea, nextHouseholds[replacementIndex], stamp) >= 0) {
+          replacementChangeCount++;
+        }
+        structureAreas.set(`${commune.communeCode}:${area.code}`, { area, commune, surveyor: entrySurveyor });
+      } else if (foundIndex >= 0) {
+        const current = nextHouseholds[foundIndex];
+        if (!isReplacedSampleStatus(current.sampleStatus)) {
+          nextHouseholds[foundIndex] = { ...current, sampleStatus: 'ĐÃ THAY THẾ', updatedAt: stamp };
+          replacementChangeCount++;
+          structureAreas.set(`${commune.communeCode}:${area.code}`, { area, commune, surveyor: entrySurveyor });
+        }
+      }
+    }
+
     nextHouseholds.forEach((household, index) => {
       const communeCode = household.communeCode?.trim() || '';
       const areaCode = household.areaCode ? normalizeAreaCode(household.areaCode) : '';
@@ -4156,7 +4365,22 @@ export default function App() {
       updatedCount++;
     }
 
-    if (updatedCount === 0) {
+    structureAreas.forEach(({ area, commune, surveyor }) => {
+      const owner = surveyor || surveyors.find(item =>
+        item.role === 'SURVEYOR' &&
+        nextHouseholds.some(household =>
+          household.assignedSurveyorId === item.id && household.areaCode === area.code &&
+          (household.communeCode === commune.communeCode || household.communeId === commune.id)
+        )
+      );
+      if (!owner) return;
+      const areaKey = getAreaProgressKey(commune.communeCode, area.code);
+      if (!processedAreas.has(`${owner.id}:${areaKey}`)) {
+        processedAreas.set(`${owner.id}:${areaKey}`, { area, commune, surveyor: owner });
+      }
+    });
+
+    if (updatedCount === 0 && addedReplacementCount + replacementChangeCount === 0) {
       throw new Error(
         `Không có phiếu hoàn thành đủ nội dung để cập nhật. ` +
         `${incompleteCount} phiếu chưa hoàn thành/thiếu nội dung, ` +
@@ -4201,7 +4425,8 @@ export default function App() {
     }
     return {
       updatedCount,
-      newCount: 0,
+      newCount: addedReplacementCount,
+      replacedCount: replacementChangeCount,
       areaCount: new Set(Array.from(processedAreas.values(), item =>
         getAreaProgressKey(item.commune.communeCode, item.area.code)
       )).size,
@@ -6257,6 +6482,20 @@ export default function App() {
             <span className={activeTab === 'entry' ? 'text-teal-950 font-black' : 'text-white'}>2. Nhập tin hộ</span>
           </button>
 
+          {currentUser.role === 'SURVEYOR' && (
+            <button 
+              onClick={() => setActiveTab('my_progress')}
+              className={`px-3.5 py-2 flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap rounded-t-md font-bold ${
+                activeTab === 'my_progress' 
+                  ? 'bg-white text-teal-950 shadow-md border-t-2 border-x border-slate-300 border-t-amber-500 font-black' 
+                  : 'text-white hover:bg-teal-700/80 border-transparent'
+              }`}
+            >
+              <TrendingUp className={`w-4 h-4 ${activeTab === 'my_progress' ? 'text-teal-800' : 'text-emerald-300'}`} />
+              <span className={activeTab === 'my_progress' ? 'text-teal-950 font-black' : 'text-white'}>3. Tiến độ của tôi</span>
+            </button>
+          )}
+
           {currentUser.role !== 'SURVEYOR' && (
             <button 
               onClick={() => setActiveTab('surveyor_progress')}
@@ -6772,6 +7011,16 @@ export default function App() {
         )}
 
         {/* TAB 2: NHẬP TIN PHIẾU HỘ (PHỤ LỤC II) */}
+        {activeTab === 'entry' && currentUser.role === 'SURVEYOR' && (
+          <MyProgressStrip
+            currentUser={currentUser}
+            households={households}
+            areas={areas}
+            communes={communes}
+            onOpenDetail={() => setActiveTab('my_progress')}
+          />
+        )}
+
         {activeTab === 'entry' && (
           <div className="bg-white rounded border border-slate-300 shadow-sm p-4 flex flex-col gap-4">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-slate-200 pb-3">
@@ -7025,6 +7274,17 @@ export default function App() {
             onNavigateToHouseholdEntry={handleNavigateToHouseholdEntryFromProgress}
             onOpenDataTransfer={() => setActiveTab('data_exchange')}
             showNotification={showNotification}
+          />
+        )}
+
+        {/* TAB: TIẾN ĐỘ CỦA RIÊNG ĐTV ĐANG ĐĂNG NHẬP */}
+        {activeTab === 'my_progress' && currentUser.role === 'SURVEYOR' && (
+          <MyProgressView
+            currentUser={currentUser}
+            households={households}
+            areas={areas}
+            communes={communes}
+            onGoToEntry={(areaId, communeId) => handleNavigateToHouseholdEntryFromProgress(currentUser.name, areaId, communeId)}
           />
         )}
 
