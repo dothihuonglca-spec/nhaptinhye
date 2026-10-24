@@ -3938,11 +3938,9 @@ export default function App() {
         .map(normalizeSurveyorName);
       const incomingSurveyors = Array.from(new Set(incomingNames.flatMap(name => surveyorsByName.get(name) || [])));
       const areaAssignmentMatches = surveyors.filter(surveyor =>
-        surveyor.role === 'SURVEYOR' &&
-        (surveyor.assignedAreas || []).some(key =>
-          key === area.id ||
-          key === `${commune.communeCode}_${area.code}` ||
-          key === `${commune.id}_${area.code}`
+        surveyor.role === 'SURVEYOR' && isAreaAssigned(
+          { ...area, communeCode: commune.communeCode },
+          surveyor.assignedAreas || []
         )
       );
       const resolvedSurveyor = assignedSurveyor ||

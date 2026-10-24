@@ -343,21 +343,25 @@ export function createAreaProgressSnapshot(
   };
 }
 
+export function getAreaAssignmentKeys(
+  area: Pick<SurveyArea, 'id' | 'code' | 'communeCode'> & { communeId?: string }
+): string[] {
+  return [
+    area.id,
+    `${area.communeId}_${area.code}`,
+    `${area.communeCode}_${area.code}`,
+    `${area.communeCode}${area.code}`,
+    `${area.communeId}${area.code}`
+  ].filter((key): key is string => Boolean(key?.trim())).map(key => key.trim());
+}
+
 export function isAreaAssigned(
   area: Pick<SurveyArea, 'id' | 'code' | 'communeCode'> & { communeId?: string },
   assignedAreas: string[]
 ): boolean {
-  if (assignedAreas.includes('ALL')) return true;
-
-  const areaKeys = [
-    area.id,
-    area.code,
-    `${area.communeId}_${area.code}`,
-    area.communeId,
-    area.communeCode
-  ];
-
-  return areaKeys.some(key => key !== undefined && assignedAreas.includes(key));
+  if (assignedAreas.some(key => key.trim() === 'ALL')) return true;
+  const assignedKeys = new Set(assignedAreas.map(key => key.trim()));
+  return getAreaAssignmentKeys(area).some(key => assignedKeys.has(key));
 }
 
 /**

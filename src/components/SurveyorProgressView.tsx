@@ -6,7 +6,7 @@
 import React, { useState, useMemo } from 'react';
 import type { Commune, Household, SurveyArea } from '../App';
 import type { Surveyor } from '../types/user';
-import { getAreaProgressKey, isOfficialSurveyHousehold, type AreaProgressSnapshot } from '../utils/areaDataTransfer';
+import { getAreaAssignmentKeys, getAreaProgressKey, isAreaAssigned, isOfficialSurveyHousehold, type AreaProgressSnapshot } from '../utils/areaDataTransfer';
 import { 
   Users, CheckCircle2, Clock, AlertCircle, Search, 
   FileSpreadsheet, FileText, Filter, Eye, ChevronRight, MapPin, 
@@ -211,7 +211,10 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
           effectiveAreas = effectiveAreas.filter(a => {
             const commune = communeMap.get(a.communeId) || communeMap.get((a as any).communeCode);
             const areaKey = getAreaProgressKey(commune?.communeCode || a.communeCode, a.code);
-            return myAssigned.has(a.id) || myAssigned.has(areaKey) || myDirectHhAreaIds.has(areaKey);
+            return isAreaAssigned(
+              { ...a, communeId: commune?.id || a.communeId, communeCode: commune?.communeCode || a.communeCode },
+              Array.from(myAssigned)
+            ) || myDirectHhAreaIds.has(areaKey);
           });
         }
       } else if (currentUser.role === 'SUPERVISOR') {
@@ -252,14 +255,30 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
       }
     });
 
+    const areaKeyByAssignmentKey = new Map<string, string>();
+    effectiveAreas.forEach(area => {
+      const areaCommune = communeMap.get(area.communeId) || communeMap.get((area as any).communeCode);
+      const areaKey = getAreaProgressKey(areaCommune?.communeCode || area.communeCode, area.code);
+      if (!areaKey) return;
+      getAreaAssignmentKeys({
+        ...area,
+        communeId: areaCommune?.id || area.communeId,
+        communeCode: areaCommune?.communeCode || area.communeCode
+      }).forEach(assignmentKey => {
+        if (!areaKeyByAssignmentKey.has(assignmentKey)) {
+          areaKeyByAssignmentKey.set(assignmentKey, areaKey);
+        }
+      });
+    });
+
     surveyors.forEach(surveyor => {
       if (surveyor.role !== 'SURVEYOR') return;
-      (surveyor.assignedAreas || []).forEach(assignedKey => {
-        if (assignedKey.includes('_')) {
-          const assignedNames = surveyorNamesByAreaKey.get(assignedKey) || new Set<string>();
-          assignedNames.add(surveyor.name);
-          surveyorNamesByAreaKey.set(assignedKey, assignedNames);
-        }
+      (surveyor.assignedAreas || []).forEach(assignmentKey => {
+        const areaKey = areaKeyByAssignmentKey.get(assignmentKey.trim());
+        if (!areaKey) return;
+        const assignedNames = surveyorNamesByAreaKey.get(areaKey) || new Set<string>();
+        assignedNames.add(surveyor.name);
+        surveyorNamesByAreaKey.set(areaKey, assignedNames);
       });
     });
 
