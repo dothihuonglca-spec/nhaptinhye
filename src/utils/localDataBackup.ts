@@ -24,7 +24,7 @@ export interface LocalDataBackupDiagnostics {
 
 export interface SurveyorEntryBackupRecord {
   id: string;
-  areaKey: string;
+  areaKey?: string;
   questionnaire: NonNullable<Household['questionnaire']>;
   surveyStatus?: Household['surveyStatus'];
   membersCount?: number;
@@ -166,21 +166,26 @@ function recordsFrom(value: unknown): Record<string, unknown>[] | null {
 }
 
 export function parseSurveyorEntryBackup(value: unknown): SurveyorEntryBackup {
-  if (!isRecord(value) || value.format !== 'tnh-entries-backup' || value.version !== 1) {
+  const isRawEntryArray = Array.isArray(value);
+  const backup = isRecord(value) ? value : undefined;
+  if (!isRawEntryArray && (!backup || backup.format !== 'tnh-entries-backup' || backup.version !== 1)) {
     throw new Error('Đây không phải file backup phiếu ĐTV được hỗ trợ.');
   }
-  if (!Array.isArray(value.entries) || value.entries.length === 0) {
+  const rawEntries = isRawEntryArray ? value : backup?.entries;
+  if (!Array.isArray(rawEntries) || rawEntries.length === 0) {
     throw new Error('File backup không có danh sách phiếu.');
   }
 
   const ids = new Set<string>();
-  const entries = value.entries.map((record): SurveyorEntryBackupRecord => {
+  const entries = rawEntries.map((record): SurveyorEntryBackupRecord => {
     if (
       !isRecord(record) ||
       typeof record.id !== 'string' ||
       !record.id ||
-      typeof record.areaKey !== 'string' ||
-      !record.areaKey ||
+      (!isRawEntryArray && (
+        typeof record.areaKey !== 'string' ||
+        !record.areaKey
+      )) ||
       !isRecord(record.questionnaire)
     ) {
       throw new Error('File backup có phiếu thiếu mã hộ, địa bàn hoặc nội dung phiếu.');
@@ -210,7 +215,7 @@ export function parseSurveyorEntryBackup(value: unknown): SurveyorEntryBackup {
 
     return {
       id: record.id,
-      areaKey: record.areaKey,
+      ...(typeof record.areaKey === 'string' ? { areaKey: record.areaKey } : {}),
       questionnaire: {
         ...createDefaultQuestionnaire(),
         ...record.questionnaire
@@ -231,7 +236,7 @@ export function parseSurveyorEntryBackup(value: unknown): SurveyorEntryBackup {
   });
 
   return {
-    ...(typeof value.exportedAt === 'string' ? { exportedAt: value.exportedAt } : {}),
+    ...(typeof backup?.exportedAt === 'string' ? { exportedAt: backup.exportedAt } : {}),
     entries
   };
 }
