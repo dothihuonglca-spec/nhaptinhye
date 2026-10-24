@@ -3,10 +3,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import type { Commune, Household, SurveyArea } from '../App';
 import type { Surveyor } from '../types/user';
-import { getAreaAssignmentKeys, getAreaProgressKey, isAreaAssigned, isOfficialSurveyHousehold, type AreaProgressSnapshot } from '../utils/areaDataTransfer';
+import {
+  getAreaAssignmentKeys, getAreaProgressKey, isAreaAssigned,
+  isCompletedSurveyStatus, isInProgressSurveyStatus, pickAreaCloudSnapshot, selectOfficialHouseholds,
+  type AreaProgressSnapshot
+} from '../utils/areaDataTransfer';
 import { 
   Users, CheckCircle2, Clock, AlertCircle, Search, 
   FileSpreadsheet, FileText, Filter, Eye, ChevronRight, MapPin, 
@@ -39,13 +43,27 @@ interface AreaProgressItem {
   areaCode: string;
   areaName: string;
   assignedSurveyorName: string;
+  /** Danh sách tên ĐTV phụ trách địa bàn (dùng cho bộ lọc theo ĐTV) */
+  surveyorNames: string[];
   totalHouseholds: number;
   completedHouseholds: number;
   inProgressHouseholds: number;
   unenteredHouseholds: number;
   completionRate: number;
   householdsList: Household[];
+  /** Con số trên bảng lấy từ đâu: Firebase (số đếm do ĐTV/Admin ghi) hay dữ liệu phiếu trên máy này */
+  progressSource: 'cloud' | 'local';
+  /** Thời điểm cập nhật của bản ghi Firebase đang dùng (rỗng nếu lấy từ máy) */
+  progressUpdatedAt: string;
+  /** Số hộ hoàn thành có phiếu chi tiết trên máy này (để đối chiếu với số đếm) */
+  localCompletedHouseholds: number;
+  /** Thời điểm địa bàn đạt 100% (xấp xỉ theo lần cập nhật cuối); rỗng nếu chưa xong */
+  completedAt: string;
 }
+
+const NO_SURVEYOR_FILTER = '__NO_SURVEYOR__';
+const LAST_SEEN_STORAGE_KEY = 'progress_last_seen_at';
+const DEFAULT_NEW_WINDOW_MS = 24 * 60 * 60 * 1000;
 
 type ProgressNoticeType = 'areas' | 'completedAreas' | 'assigned' | 'completed' | 'inProgress' | 'notEntered';
 
@@ -70,9 +88,31 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
   const [tkcsFilter, setTkcsFilter] = useState('ALL');
   const [communeFilter, setCommuneFilter] = useState('ALL');
   const [progressStatusFilter, setProgressStatusFilter] = useState<'ALL' | 'DONE' | 'DOING' | 'NOT_STARTED'>('ALL');
+  // Lọc theo ĐTV: 'ALL' = tất cả, NO_SURVEYOR_FILTER = địa bàn chưa phân công, còn lại = tên ĐTV
+  const [surveyorFilter, setSurveyorFilter] = useState('ALL');
+  // Chỉ xem các địa bàn mới hoàn thành kể từ "lần xem trước" (xem banner phía trên bộ lọc)
+  const [onlyNewCompleted, setOnlyNewCompleted] = useState(false);
+  const [openedAt] = useState(() => Date.now());
+  const [lastSeenAt, setLastSeenAt] = useState<number | null>(() => {
+    try {
+      const raw = localStorage.getItem(LAST_SEEN_STORAGE_KEY);
+      const value = raw ? Number(raw) : NaN;
+      return Number.isFinite(value) ? value : null;
+    } catch (e) {
+      return null;
+    }
+  });
   const [viewMode, setViewMode] = useState<'grid' | 'grouped'>('grid');
   const [selectedAreaDetail, setSelectedAreaDetail] = useState<AreaProgressItem | null>(null);
   const [progressNotice, setProgressNotice] = useState<ProgressNotice | null>(null);
+  const [noticeCommuneFilter, setNoticeCommuneFilter] = useState('ALL');
+  const [noticeAreaFilter, setNoticeAreaFilter] = useState('ALL');
+
+  // Mỗi lần mở/đóng cửa sổ danh sách thì đưa bộ lọc xã/địa bàn về "Tất cả"
+  useEffect(() => {
+    setNoticeCommuneFilter('ALL');
+    setNoticeAreaFilter('ALL');
+  }, [progressNotice]);
 
   // Danh sách xã được phép truy cập theo phân quyền
   const allowedCommunes = useMemo(() => {
@@ -239,6 +279,7 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
     const hhByAreaId = new Map<string, Household[]>();
     const hhByAreaKey = new Map<string, Household[]>();
     const surveyorNamesByAreaKey = new Map<string, Set<string>>();
+    const surveyorIdsByAreaKey = new Map<string, Set<string>>();
     const cloudProgressByAreaKey = new Map<string, AreaProgressSnapshot[]>();
     const cloudProgressByAreaId = new Map<string, AreaProgressSnapshot[]>();
 
@@ -279,6 +320,9 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
         const assignedNames = surveyorNamesByAreaKey.get(areaKey) || new Set<string>();
         assignedNames.add(surveyor.name);
         surveyorNamesByAreaKey.set(areaKey, assignedNames);
+        const assignedIds = surveyorIdsByAreaKey.get(areaKey) || new Set<string>();
+        assignedIds.add(surveyor.id);
+        surveyorIdsByAreaKey.set(areaKey, assignedIds);
       });
     });
 
@@ -300,24 +344,18 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
         ? hhByAreaKey.get(areaKey) || []
         : hhByAreaId.get(area.id) || [];
 
-      // A missing official roster must not turn reserve households into progress.
-      const officialHHs = Array.from(new Map(
-        allAreaHHs
-          .filter(isOfficialSurveyHousehold)
-          .map(h => [h.sttMau?.trim() || h.id, h])
-      ).values()).slice(0, 10);
+      // 10 hộ chính thức: dùng CHUNG một hàm với phía ghi lên Firebase để hai bên chọn cùng một bộ hộ.
+      const officialHHs = selectOfficialHouseholds(allAreaHHs);
       const assignedHHs = officialHHs;
 
       const localTotalHouseholds = assignedHHs.length;
-      const localCompletedHouseholds = assignedHHs.filter(h =>
-        h.surveyStatus === 'DA_DUYET' ||
-        h.surveyStatus === 'DA_HOAN_THANH' ||
-        h.surveyStatus === 'COMPLETED' ||
-        h.surveyStatus === 'HOAN_THANH'
-      ).length;
-      const localInProgressHouseholds = assignedHHs.filter(h =>
-        h.surveyStatus === 'DANG_NHAP' || h.surveyStatus === 'IN_PROGRESS'
-      ).length;
+      const localCompletedHouseholds = assignedHHs.filter(h => isCompletedSurveyStatus(h.surveyStatus)).length;
+      const localInProgressHouseholds = assignedHHs.filter(h => isInProgressSurveyStatus(h.surveyStatus)).length;
+      // Thời điểm phiếu mới nhất trên máy này
+      const localLatestTime = assignedHHs.reduce((latest, h) => {
+        const t = Date.parse(h.updatedAt || '');
+        return Number.isFinite(t) && t > latest ? t : latest;
+      }, Number.NEGATIVE_INFINITY);
 
       // Tìm tên người nhập / ĐTV phụ trách địa bàn này
       const surveyorSet = new Set<string>();
@@ -326,42 +364,38 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
       });
       (surveyorNamesByAreaKey.get(areaKey) || []).forEach(name => surveyorSet.add(name));
 
-      const remoteProgressBySurveyor = new Map<string, AreaProgressSnapshot>();
-      (areaKey
-        ? cloudProgressByAreaKey.get(areaKey) || []
-        : cloudProgressByAreaId.get(area.id) || [])
-        .forEach(item => {
-          const key = item.surveyorId || item.surveyorName || item.id;
-          const existing = remoteProgressBySurveyor.get(key);
-          const itemUpdatedAt = Date.parse(item.updatedAt || '');
-          const existingUpdatedAt = existing ? Date.parse(existing.updatedAt || '') : Number.NEGATIVE_INFINITY;
-          if (
-            !existing ||
-            (Number.isFinite(itemUpdatedAt) &&
-              (!Number.isFinite(existingUpdatedAt) || itemUpdatedAt >= existingUpdatedAt))
-          ) {
-            remoteProgressBySurveyor.set(key, item);
-          }
-        });
-      const remoteProgress = Array.from(remoteProgressBySurveyor.values());
-      remoteProgress.forEach(item => surveyorSet.add(item.surveyorName));
-      const remoteTotalHouseholds = Math.min(10, remoteProgress.reduce(
-        (total, item) => total + item.totalHouseholds,
-        0
-      ));
-      const totalHouseholds = allAreaHHs.length > 0
-        ? localTotalHouseholds
-        : remoteTotalHouseholds;
-      const doneTotal = Math.min(totalHouseholds, Math.max(
-        localCompletedHouseholds,
-        remoteProgress.reduce((total, item) => total + item.completedHouseholds, 0)
-      ));
+      // ĐTV đang được giao địa bàn này (để bỏ bản ghi Firebase cũ của ĐTV đã bị đổi)
+      const assignedSurveyorIds = new Set<string>(surveyorIdsByAreaKey.get(areaKey) || []);
+      assignedHHs.forEach(h => {
+        if (h.assignedSurveyorId) assignedSurveyorIds.add(h.assignedSurveyorId);
+      });
+
+      // MỘT bản ghi Firebase duy nhất cho địa bàn (không cộng dồn nhiều ĐTV)
+      const cloudSnapshot = pickAreaCloudSnapshot(
+        areaKey
+          ? cloudProgressByAreaKey.get(areaKey) || []
+          : cloudProgressByAreaId.get(area.id) || [],
+        assignedSurveyorIds
+      );
+      if (cloudSnapshot?.surveyorName) surveyorSet.add(cloudSnapshot.surveyorName);
+
+      // Chọn nguồn theo thời điểm, KHÔNG lấy "số lớn hơn":
+      // - có phiếu trên máy mới hơn bản ghi Firebase (vừa lưu/xóa trắng/sửa trạng thái) → dùng máy;
+      // - ngược lại → dùng Firebase.
+      const cloudTime = cloudSnapshot ? Date.parse(cloudSnapshot.updatedAt || '') : Number.NaN;
+      const localIsNewer = Number.isFinite(localLatestTime) && Number.isFinite(cloudTime) && localLatestTime > cloudTime;
+      const useCloud = !!cloudSnapshot && !localIsNewer;
+
+      const totalHouseholds = useCloud
+        ? Math.min(10, Math.max(localTotalHouseholds, cloudSnapshot!.totalHouseholds))
+        : localTotalHouseholds;
+      const doneTotal = Math.min(
+        totalHouseholds,
+        useCloud ? cloudSnapshot!.completedHouseholds : localCompletedHouseholds
+      );
       const inProgressHouseholds = Math.min(
         totalHouseholds - doneTotal,
-        Math.max(
-          localInProgressHouseholds,
-          remoteProgress.reduce((total, item) => total + item.inProgressHouseholds, 0)
-        )
+        useCloud ? cloudSnapshot!.inProgressHouseholds : localInProgressHouseholds
       );
       const unenteredHouseholds = Math.max(0, totalHouseholds - doneTotal - inProgressHouseholds);
       const completionRate = totalHouseholds > 0 ? Math.round((doneTotal / totalHouseholds) * 100) : 0;
@@ -386,17 +420,95 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
         areaCode: area.code,
         areaName: areaNameFinal,
         assignedSurveyorName: surveyorNamesStr,
+        surveyorNames: Array.from(surveyorSet),
         totalHouseholds,
         completedHouseholds: doneTotal,
         inProgressHouseholds,
         unenteredHouseholds: Math.max(0, unenteredHouseholds),
         completionRate,
-        householdsList: assignedHHs
+        householdsList: assignedHHs,
+        progressSource: useCloud ? 'cloud' : 'local',
+        progressUpdatedAt: useCloud ? cloudSnapshot!.updatedAt || '' : '',
+        localCompletedHouseholds,
+        completedAt: totalHouseholds > 0 && doneTotal >= totalHouseholds
+          ? (useCloud
+              ? cloudSnapshot!.updatedAt || ''
+              : Number.isFinite(localLatestTime) ? new Date(localLatestTime).toISOString() : '')
+          : ''
       };
     });
   }, [areas, communes, households, surveyors, currentUser, cloudProgress]);
 
   // Lọc danh sách theo bộ lọc
+  // Mốc "mới": từ lần bấm "Đánh dấu đã xem" gần nhất; chưa bấm lần nào thì tính 24 giờ qua
+  const newSinceMs = lastSeenAt ?? (openedAt - DEFAULT_NEW_WINDOW_MS);
+  const isNewlyCompleted = (item: AreaProgressItem) => {
+    if (!item.completedAt) return false;
+    const t = Date.parse(item.completedAt);
+    return Number.isFinite(t) && t > newSinceMs;
+  };
+
+  // Các địa bàn mới hoàn thành, gom theo ĐTV (không phụ thuộc bộ lọc đang chọn để Admin luôn thấy tin mới)
+  const newlyCompletedByAreaSurveyor = useMemo(() => {
+    const groups = new Map<string, AreaProgressItem[]>();
+    areaProgressList.forEach(item => {
+      if (!isNewlyCompleted(item)) return;
+      const names = item.surveyorNames.length > 0 ? item.surveyorNames : ['Chưa rõ ĐTV'];
+      names.forEach(name => {
+        const list = groups.get(name) || [];
+        list.push(item);
+        groups.set(name, list);
+      });
+    });
+    return Array.from(groups.entries())
+      .map(([name, items]) => ({
+        name,
+        items: items.sort((a, b) => Date.parse(b.completedAt) - Date.parse(a.completedAt))
+      }))
+      .sort((a, b) => b.items.length - a.items.length || a.name.localeCompare(b.name, 'vi'));
+  }, [areaProgressList, newSinceMs]);
+  const newlyCompletedAreaCount = useMemo(
+    () => new Set(newlyCompletedByAreaSurveyor.flatMap(group => group.items.map(item => item.id))).size,
+    [newlyCompletedByAreaSurveyor]
+  );
+
+  const markProgressSeen = () => {
+    const now = Date.now();
+    setLastSeenAt(now);
+    setOnlyNewCompleted(false);
+    try { localStorage.setItem(LAST_SEEN_STORAGE_KEY, String(now)); } catch (e) {}
+  };
+
+  // Danh sách ĐTV để chọn lọc: lấy từ các địa bàn đang thuộc phạm vi Tổ TKCS / Xã đã chọn
+  const surveyorFilterOptions = useMemo(() => {
+    const counts = new Map<string, number>();
+    let unassignedAreas = 0;
+    areaProgressList.forEach(item => {
+      if (tkcsFilter !== 'ALL' && item.tkcsCode !== tkcsFilter) return;
+      if (communeFilter !== 'ALL' && item.commune?.id !== communeFilter && item.commune?.communeCode !== communeFilter && item.area.communeId !== communeFilter) return;
+      if (item.surveyorNames.length === 0) {
+        unassignedAreas++;
+        return;
+      }
+      item.surveyorNames.forEach(name => counts.set(name, (counts.get(name) || 0) + 1));
+    });
+    return {
+      surveyors: Array.from(counts.entries())
+        .map(([name, areaCount]) => ({ name, areaCount }))
+        .sort((a, b) => a.name.localeCompare(b.name, 'vi')),
+      unassignedAreas
+    };
+  }, [areaProgressList, tkcsFilter, communeFilter]);
+
+  // Nếu ĐTV đang chọn không còn trong phạm vi Tổ TKCS / Xã mới thì đưa về "Tất cả ĐTV"
+  useEffect(() => {
+    if (surveyorFilter === 'ALL') return;
+    const stillThere = surveyorFilter === NO_SURVEYOR_FILTER
+      ? surveyorFilterOptions.unassignedAreas > 0
+      : surveyorFilterOptions.surveyors.some(s => s.name === surveyorFilter);
+    if (!stillThere) setSurveyorFilter('ALL');
+  }, [surveyorFilter, surveyorFilterOptions]);
+
   const filteredProgressList = useMemo(() => {
     return areaProgressList.filter(item => {
       // 1. Lọc theo TKCS
@@ -409,6 +521,13 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
       if (progressStatusFilter === 'DONE' && item.completionRate < 100) return false;
       if (progressStatusFilter === 'DOING' && (item.completionRate === 0 || item.completionRate >= 100)) return false;
       if (progressStatusFilter === 'NOT_STARTED' && item.completionRate > 0) return false;
+
+      // 3b. Lọc theo ĐTV
+      if (surveyorFilter === NO_SURVEYOR_FILTER && item.surveyorNames.length > 0) return false;
+      if (surveyorFilter !== 'ALL' && surveyorFilter !== NO_SURVEYOR_FILTER && !item.surveyorNames.includes(surveyorFilter)) return false;
+
+      // 3c. Chỉ địa bàn mới hoàn thành
+      if (onlyNewCompleted && !isNewlyCompleted(item)) return false;
 
       // 4. Tìm kiếm từ khóa
       if (searchTerm.trim()) {
@@ -423,7 +542,7 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
 
       return true;
     });
-  }, [areaProgressList, tkcsFilter, communeFilter, progressStatusFilter, searchTerm]);
+  }, [areaProgressList, tkcsFilter, communeFilter, progressStatusFilter, surveyorFilter, onlyNewCompleted, newSinceMs, searchTerm]);
 
   // Nhóm danh sách theo điều tra viên (dùng cho chế độ Dạng Nhóm)
   const groupedBySurveyorList = useMemo(() => {
@@ -507,6 +626,158 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
     return Array.from(uniqueHouseholds.values());
   }, [filteredProgressList, progressNotice]);
 
+  const isCompleteStatus = isCompletedSurveyStatus;
+  const isInProgressStatus = isInProgressSurveyStatus;
+  const formatSyncTime = (iso: string) => {
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime())
+      ? ''
+      : d.toLocaleString('vi-VN', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  };
+  const getStatusLabel = (status?: string) =>
+    status === 'DA_DUYET' ? 'Đã duyệt'
+      : isCompleteStatus(status) ? 'Đã hoàn thành'
+        : isInProgressStatus(status) ? 'Đang nhập'
+          : 'Chưa nhập';
+
+  // Bộ lọc Xã / Địa bàn trong cửa sổ danh sách hộ (lấy từ toàn bộ địa bàn đang lọc,
+  // kể cả địa bàn chưa có hộ nào hoàn thành để còn biết địa bàn nào đang thiếu)
+  const noticeCommuneOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    filteredProgressList.forEach(item => {
+      if (!map.has(item.communeCode)) map.set(item.communeCode, item.communeName);
+    });
+    return Array.from(map.entries())
+      .map(([code, name]) => ({ code, name }))
+      .sort((a, b) => a.code.localeCompare(b.code, 'vi', { numeric: true }));
+  }, [filteredProgressList]);
+
+  const noticeAreaOptions = useMemo(() =>
+    filteredProgressList
+      .filter(item => noticeCommuneFilter === 'ALL' || item.communeCode === noticeCommuneFilter)
+      .sort((a, b) =>
+        a.communeCode.localeCompare(b.communeCode, 'vi', { numeric: true }) ||
+        a.areaCode.localeCompare(b.areaCode, 'vi', { numeric: true })
+      ),
+    [filteredProgressList, noticeCommuneFilter]
+  );
+
+  const filteredNoticeHouseholds = useMemo(() =>
+    progressNoticeHouseholds
+      .filter(({ area }) =>
+        (noticeCommuneFilter === 'ALL' || area.communeCode === noticeCommuneFilter) &&
+        (noticeAreaFilter === 'ALL' || area.id === noticeAreaFilter)
+      )
+      .sort((a, b) =>
+        a.area.communeCode.localeCompare(b.area.communeCode, 'vi', { numeric: true }) ||
+        a.area.areaCode.localeCompare(b.area.areaCode, 'vi', { numeric: true }) ||
+        (Number(a.household.sttMau) || 0) - (Number(b.household.sttMau) || 0)
+      ),
+    [progressNoticeHouseholds, noticeCommuneFilter, noticeAreaFilter]
+  );
+
+  // Xuất Excel danh sách hộ đang xem (theo bộ lọc) + sheet tổng hợp theo địa bàn
+  const handleExportNoticeHouseholds = () => {
+    if (!progressNotice) return;
+    try {
+      const now = new Date();
+      const communeLabel = noticeCommuneFilter === 'ALL'
+        ? 'Tất cả xã'
+        : (() => {
+            const c = noticeCommuneOptions.find(o => o.code === noticeCommuneFilter);
+            return c ? `[${c.code}] ${c.name}` : noticeCommuneFilter;
+          })();
+      const areaLabel = noticeAreaFilter === 'ALL'
+        ? 'Tất cả địa bàn'
+        : (() => {
+            const a = filteredProgressList.find(i => i.id === noticeAreaFilter);
+            return a ? `${a.areaName} (${a.areaCode})` : noticeAreaFilter;
+          })();
+
+      const wb = XLSX.utils.book_new();
+
+      // Sheet 1: danh sách hộ
+      const hhRows: any[][] = [
+        [progressNotice.title.toUpperCase()],
+        [`Ngày xuất: ${now.toLocaleDateString('vi-VN')} ${now.toLocaleTimeString('vi-VN')} | Phạm vi: ${communeLabel} / ${areaLabel} | ${filteredNoticeHouseholds.length} hộ`],
+        [],
+        ['STT', 'Mã xã', 'Tên xã', 'Mã địa bàn', 'Tên địa bàn', 'STT mẫu', 'Chủ hộ', 'Người nhập / ĐTV', 'Trạng thái', 'Cập nhật']
+      ];
+      filteredNoticeHouseholds.forEach(({ household, area }, index) => {
+        hhRows.push([
+          index + 1,
+          area.communeCode,
+          area.communeName,
+          area.areaCode,
+          area.areaName,
+          household.sttMau || '',
+          household.householdHead || '',
+          household.assignedSurveyorName || area.assignedSurveyorName,
+          getStatusLabel(household.surveyStatus),
+          household.updatedAt ? new Date(household.updatedAt).toLocaleString('vi-VN') : ''
+        ]);
+      });
+      const ws1 = XLSX.utils.aoa_to_sheet(hhRows);
+      ws1['!cols'] = [{ wch: 6 }, { wch: 10 }, { wch: 22 }, { wch: 11 }, { wch: 28 }, { wch: 9 }, { wch: 28 }, { wch: 22 }, { wch: 15 }, { wch: 20 }];
+      XLSX.utils.book_append_sheet(wb, ws1, 'DanhSachHo');
+
+      // Sheet 2: tổng hợp từng địa bàn trong phạm vi lọc (kể cả địa bàn chưa có hộ xong)
+      const scopeAreas = filteredProgressList
+        .filter(item =>
+          (noticeCommuneFilter === 'ALL' || item.communeCode === noticeCommuneFilter) &&
+          (noticeAreaFilter === 'ALL' || item.id === noticeAreaFilter)
+        )
+        .sort((a, b) =>
+          a.communeCode.localeCompare(b.communeCode, 'vi', { numeric: true }) ||
+          a.areaCode.localeCompare(b.areaCode, 'vi', { numeric: true })
+        );
+      const areaRows: any[][] = [
+        ['TỔNG HỢP HOÀN THÀNH THEO ĐỊA BÀN'],
+        [`Ngày xuất: ${now.toLocaleDateString('vi-VN')} ${now.toLocaleTimeString('vi-VN')} | Phạm vi: ${communeLabel} / ${areaLabel}`],
+        [],
+        ['STT', 'Mã xã', 'Tên xã', 'Mã địa bàn', 'Tên địa bàn', 'Người nhập / ĐTV', 'Tổng số hộ', 'Đã hoàn thành', 'Còn thiếu', 'Kết luận', 'STT mẫu chưa xong (theo máy này)']
+      ];
+      scopeAreas.forEach((item, index) => {
+        const pending = item.householdsList
+          .filter(h => !isCompleteStatus(h.surveyStatus))
+          .map(h => h.sttMau || h.householdHead)
+          .join(', ');
+        const missing = Math.max(0, item.totalHouseholds - item.completedHouseholds);
+        areaRows.push([
+          index + 1,
+          item.communeCode,
+          item.communeName,
+          item.areaCode,
+          item.areaName,
+          item.assignedSurveyorName,
+          item.totalHouseholds,
+          item.completedHouseholds,
+          missing,
+          item.totalHouseholds > 0 && missing === 0 ? 'Đủ' : 'Chưa đủ',
+          pending
+        ]);
+      });
+      const incompleteCount = scopeAreas.filter(i => !(i.totalHouseholds > 0 && i.completedHouseholds >= i.totalHouseholds)).length;
+      areaRows.push([]);
+      areaRows.push(['TỔNG CỘNG', '', '', '', '', `${scopeAreas.length} địa bàn`,
+        scopeAreas.reduce((t, i) => t + i.totalHouseholds, 0),
+        scopeAreas.reduce((t, i) => t + i.completedHouseholds, 0),
+        scopeAreas.reduce((t, i) => t + Math.max(0, i.totalHouseholds - i.completedHouseholds), 0),
+        `${incompleteCount} địa bàn chưa đủ`, '']);
+      const ws2 = XLSX.utils.aoa_to_sheet(areaRows);
+      ws2['!cols'] = [{ wch: 6 }, { wch: 10 }, { wch: 22 }, { wch: 11 }, { wch: 28 }, { wch: 22 }, { wch: 11 }, { wch: 14 }, { wch: 10 }, { wch: 16 }, { wch: 40 }];
+      XLSX.utils.book_append_sheet(wb, ws2, 'TongHopDiaBan');
+
+      const typeSlug: Record<string, string> = {
+        completed: 'Hoan_Thanh', inProgress: 'Dang_Nhap', notEntered: 'Chua_Nhap', assigned: 'Tong_So'
+      };
+      XLSX.writeFile(wb, `Danh_Sach_Ho_${typeSlug[progressNotice.type] || 'Tien_Do'}_${now.toISOString().slice(0, 10)}.xlsx`);
+      showNotification('success', `Đã xuất ${filteredNoticeHouseholds.length} hộ và tổng hợp ${scopeAreas.length} địa bàn.`);
+    } catch (e: any) {
+      showNotification('error', 'Lỗi xuất Excel: ' + e.message);
+    }
+  };
+
   // Xuất file Excel báo cáo tiến độ
   const handleExportExcelProgress = () => {
     try {
@@ -569,80 +840,6 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
       XLSX.utils.book_append_sheet(wb, ws, 'TienDoDiaBan');
       XLSX.writeFile(wb, `Bao_Cao_Tien_Do_Theo_Dia_Ban_${new Date().toISOString().slice(0, 10)}.xlsx`);
       showNotification('success', 'Đã xuất file Excel báo cáo tiến độ địa bàn thành công!');
-    } catch (e: any) {
-      showNotification('error', 'Lỗi xuất Excel: ' + e.message);
-    }
-  };
-
-  const handleExportProgressNotice = () => {
-    if (!progressNotice) return;
-    try {
-      const wb = XLSX.utils.book_new();
-      const isAreaNotice = progressNotice.type === 'areas' || progressNotice.type === 'completedAreas';
-      const wsData: (string | number)[][] = isAreaNotice
-        ? [
-            [progressNotice.title],
-            [`Ngày xuất: ${new Date().toLocaleString('vi-VN')}`],
-            [],
-            ['Mã TKCS', 'Tên TKCS', 'Mã xã', 'Tên xã', 'Mã địa bàn', 'Tên địa bàn', 'ĐTV', 'Tổng số hộ', 'Đã nhập', 'Chưa nhập', 'Tiến độ (%)'],
-            ...progressNoticeAreas.map(item => [
-              item.tkcsCode,
-              item.tkcsName,
-              item.communeCode,
-              item.communeName,
-              item.areaCode,
-              item.areaName,
-              item.assignedSurveyorName,
-              item.totalHouseholds,
-              item.completedHouseholds,
-              item.unenteredHouseholds,
-              item.completionRate
-            ])
-          ]
-        : [
-            [progressNotice.title],
-            [`Ngày xuất: ${new Date().toLocaleString('vi-VN')}`],
-            [],
-            ['Mã xã', 'Tên xã', 'Mã địa bàn', 'Tên địa bàn', 'STT mẫu', 'Chủ hộ', 'ĐTV', 'Trạng thái', 'Cập nhật'],
-            ...progressNoticeHouseholds.map(({ household, area }) => {
-              const isComplete = [
-                'DA_HOAN_THANH',
-                'DA_DUYET',
-                'COMPLETED',
-                'HOAN_THANH'
-              ].includes(household.surveyStatus || '');
-              const isInProgress =
-                household.surveyStatus === 'DANG_NHAP' ||
-                household.surveyStatus === 'IN_PROGRESS';
-              const statusLabel = household.surveyStatus === 'DA_DUYET'
-                ? 'Đã duyệt'
-                : isComplete
-                  ? 'Đã hoàn thành'
-                  : isInProgress
-                    ? 'Đang nhập'
-                    : 'Chưa nhập';
-              return [
-                household.communeCode || area.communeCode,
-                household.communeName || area.communeName,
-                area.areaCode,
-                area.areaName,
-                household.sttMau,
-                household.householdHead,
-                household.assignedSurveyorName || area.assignedSurveyorName,
-                statusLabel,
-                household.updatedAt ? new Date(household.updatedAt).toLocaleString('vi-VN') : ''
-              ];
-            })
-          ];
-      const worksheet = XLSX.utils.aoa_to_sheet(wsData);
-      XLSX.utils.book_append_sheet(wb, worksheet, 'DanhSach');
-      const filename = progressNotice.title
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/[^a-zA-Z0-9]+/g, '_')
-        .replace(/^_|_$/g, '');
-      XLSX.writeFile(wb, `${filename || 'Tien_Do'}_${new Date().toISOString().slice(0, 10)}.xlsx`);
-      showNotification('success', `Đã xuất Excel: ${progressNotice.title}.`);
     } catch (e: any) {
       showNotification('error', 'Lỗi xuất Excel: ' + e.message);
     }
@@ -746,6 +943,63 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
         </div>
       </div>
 
+      {/* BANNER: ĐTV nào vừa hoàn thành địa bàn (chỉ Admin / Quản lý / Giám sát) */}
+      {currentUser.role !== 'SURVEYOR' && (
+        <div className="bg-rose-50 border border-rose-300 rounded-lg p-3 text-xs flex flex-col gap-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="font-bold text-rose-900">
+              {newlyCompletedAreaCount > 0
+                ? `🆕 Có ${newlyCompletedAreaCount} địa bàn mới hoàn thành 100% kể từ ${lastSeenAt ? new Date(lastSeenAt).toLocaleString('vi-VN') : '24 giờ qua'}`
+                : `Chưa có địa bàn nào mới hoàn thành kể từ ${lastSeenAt ? new Date(lastSeenAt).toLocaleString('vi-VN') : '24 giờ qua'}`}
+            </p>
+            <div className="flex items-center gap-2">
+              {newlyCompletedAreaCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setOnlyNewCompleted(value => !value)}
+                  className={`px-2.5 py-1 rounded border font-bold cursor-pointer ${
+                    onlyNewCompleted
+                      ? 'bg-rose-700 border-rose-800 text-white'
+                      : 'bg-white border-rose-400 text-rose-800 hover:bg-rose-100'
+                  }`}
+                >
+                  {onlyNewCompleted ? 'Đang chỉ xem địa bàn mới xong (bấm để bỏ)' : 'Chỉ xem địa bàn mới xong'}
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={markProgressSeen}
+                className="px-2.5 py-1 rounded border border-slate-400 bg-white hover:bg-slate-100 text-slate-800 font-bold cursor-pointer"
+                title="Từ giờ chỉ tính là mới những địa bàn hoàn thành sau thời điểm này (lưu trên máy này)"
+              >
+                Đánh dấu đã xem
+              </button>
+            </div>
+          </div>
+          {newlyCompletedByAreaSurveyor.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {newlyCompletedByAreaSurveyor.map(group => (
+                <button
+                  key={group.name}
+                  type="button"
+                  onClick={() => {
+                    setTkcsFilter('ALL');
+                    setCommuneFilter('ALL');
+                    setProgressStatusFilter('ALL');
+                    setSurveyorFilter(group.name === 'Chưa rõ ĐTV' ? NO_SURVEYOR_FILTER : group.name);
+                    setOnlyNewCompleted(true);
+                  }}
+                  className="px-2 py-1 rounded border border-rose-300 bg-white hover:bg-rose-100 text-rose-900 cursor-pointer text-left"
+                  title={group.items.map(item => `${item.communeName} - ${item.areaName} (${item.areaCode}) • xong lúc ${formatSyncTime(item.completedAt)}`).join('\n')}
+                >
+                  <strong>{group.name}</strong>: {group.items.length} địa bàn
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* TOOLBAR BỘ LỌC TẬP TRUNG & CHUYỂN ĐỔI DẠNG HIỂN THỊ */}
       <div className="bg-white rounded-lg border border-slate-300 shadow-2xs p-3 flex flex-wrap items-center justify-between gap-3 text-xs">
         <div className="flex flex-wrap items-center gap-2.5">
@@ -794,6 +1048,24 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
               <option value="DONE">✓ Đã hoàn thành 100%</option>
               <option value="DOING">⏳ Đang nhập (1% - 99%)</option>
               <option value="NOT_STARTED">⚠️ Chưa nhập hộ nào (0%)</option>
+            </select>
+          </div>
+
+          {/* Lọc theo ĐTV */}
+          <div className="flex items-center gap-1.5">
+            <span className="font-bold text-slate-700 whitespace-nowrap">ĐTV:</span>
+            <select
+              value={surveyorFilter}
+              onChange={e => setSurveyorFilter(e.target.value)}
+              className="h-8 bg-slate-50 border border-slate-300 rounded px-2.5 font-medium text-slate-800 focus:outline-none focus:border-teal-600 cursor-pointer max-w-[240px]"
+            >
+              <option value="ALL">-- Tất cả ĐTV ({surveyorFilterOptions.surveyors.length}) --</option>
+              {surveyorFilterOptions.surveyors.map(s => (
+                <option key={s.name} value={s.name}>{s.name} ({s.areaCount} địa bàn)</option>
+              ))}
+              {surveyorFilterOptions.unassignedAreas > 0 && (
+                <option value={NO_SURVEYOR_FILTER}>Chưa phân công ({surveyorFilterOptions.unassignedAreas} địa bàn)</option>
+              )}
             </select>
           </div>
         </div>
@@ -933,6 +1205,19 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
                       {/* Đã nhập */}
                       <td className="p-2 border border-slate-300 text-center font-bold text-emerald-700 bg-emerald-50/50">
                         {item.completedHouseholds}
+                        <div
+                          className="text-[9px] font-normal text-slate-500 leading-tight"
+                          title={item.progressSource === 'cloud'
+                            ? `Số đếm lấy từ Firebase, cập nhật lúc ${formatSyncTime(item.progressUpdatedAt)}. Máy này có phiếu chi tiết của ${item.localCompletedHouseholds} hộ hoàn thành.`
+                            : 'Số đếm tính từ phiếu trên máy này (mới hơn hoặc chưa có dữ liệu trên Firebase).'}
+                        >
+                          {item.progressSource === 'cloud'
+                            ? `FB ${formatSyncTime(item.progressUpdatedAt)}`
+                            : 'Máy này'}
+                          {item.progressSource === 'cloud' && item.localCompletedHouseholds < item.completedHouseholds && (
+                            <span className="text-amber-700"> • máy có {item.localCompletedHouseholds}</span>
+                          )}
+                        </div>
                       </td>
 
                       {/* Chưa nhập */}
@@ -971,6 +1256,14 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
                             }`}>
                               {item.completionRate}%
                             </span>
+                          </div>
+                        )}
+                        {isComplete && item.completedAt && (
+                          <div className="mt-0.5 text-[10px] text-emerald-700 leading-tight">
+                            {isNewlyCompleted(item) && (
+                              <span className="mr-1 px-1 py-px rounded bg-rose-600 text-white font-black">MỚI</span>
+                            )}
+                            Xong lúc {formatSyncTime(item.completedAt)}
                           </div>
                         )}
                       </td>
@@ -1150,6 +1443,11 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
                   </h3>
                   <p className="text-[11px] text-teal-100">
                     Người nhập / ĐTV: {selectedAreaDetail.assignedSurveyorName} • Tổng số: {selectedAreaDetail.totalHouseholds} hộ • Đã xong: {selectedAreaDetail.completedHouseholds} • Chưa nhập: {selectedAreaDetail.unenteredHouseholds} ({selectedAreaDetail.completionRate}%)
+                    {selectedAreaDetail.progressSource === 'cloud' && selectedAreaDetail.localCompletedHouseholds < selectedAreaDetail.completedHouseholds && (
+                      <span className="block text-amber-200 font-semibold mt-0.5">
+                        Lưu ý: số đếm lấy từ Firebase ({formatSyncTime(selectedAreaDetail.progressUpdatedAt)}), nhưng máy này mới có phiếu chi tiết của {selectedAreaDetail.localCompletedHouseholds} hộ hoàn thành. Hãy nhập file kết quả mới nhất của ĐTV để danh sách bên dưới đủ hộ.
+                      </span>
+                    )}
                   </p>
                 </div>
               </div>
@@ -1198,8 +1496,8 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
                   </thead>
                   <tbody className="divide-y divide-slate-200">
                     {selectedAreaDetail.householdsList.map((h, i) => {
-                      const isDone = h.surveyStatus === 'DA_HOAN_THANH' || h.surveyStatus === 'DA_DUYET';
-                      const isDoing = h.surveyStatus === 'DANG_NHAP';
+                      const isDone = isCompletedSurveyStatus(h.surveyStatus);
+                      const isDoing = isInProgressSurveyStatus(h.surveyStatus);
                       const areaName = (h as any).sheetName || h.areaName || `ĐB ${h.areaCode}`;
 
                       return (
@@ -1287,30 +1585,17 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
                 <p className="text-[11px] text-teal-100 mt-0.5">
                   {progressNotice.type === 'areas' || progressNotice.type === 'completedAreas'
                     ? `${progressNoticeAreas.length} địa bàn trong phạm vi đang lọc`
-                    : `${progressNoticeHouseholds.length} hộ có thông tin chi tiết trên máy này`}
+                    : `${filteredNoticeHouseholds.length}/${progressNoticeHouseholds.length} hộ có thông tin chi tiết trên máy này`}
                 </p>
               </div>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={handleExportProgressNotice}
-                  disabled={progressNotice.type === 'areas' || progressNotice.type === 'completedAreas'
-                    ? progressNoticeAreas.length === 0
-                    : progressNoticeHouseholds.length === 0}
-                  className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 disabled:bg-emerald-800/50 disabled:cursor-not-allowed text-white rounded font-bold text-[11px] flex items-center gap-1.5 cursor-pointer transition-colors"
-                >
-                  <FileSpreadsheet className="w-3.5 h-3.5" />
-                  <span>Xuất Excel</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setProgressNotice(null)}
-                  className="text-white hover:bg-[#047484] p-1.5 rounded cursor-pointer transition-colors"
-                  aria-label="Đóng danh sách tiến độ"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={() => setProgressNotice(null)}
+                className="text-white hover:bg-[#047484] p-1.5 rounded cursor-pointer transition-colors"
+                aria-label="Đóng danh sách tiến độ"
+              >
+                <X className="w-4 h-4" />
+              </button>
             </div>
 
             <div className="p-3.5 overflow-auto flex-1">
@@ -1364,9 +1649,54 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
                 )
               ) : progressNoticeHouseholds.length > 0 ? (
                 <>
+                  <div className="flex flex-wrap items-center gap-2 mb-2 p-2 bg-slate-50 border border-slate-200 rounded">
+                    <label className="flex items-center gap-1 font-bold text-slate-700">
+                      Xã:
+                      <select
+                        value={noticeCommuneFilter}
+                        onChange={e => {
+                          setNoticeCommuneFilter(e.target.value);
+                          setNoticeAreaFilter('ALL');
+                        }}
+                        className="border border-slate-300 rounded px-2 py-1 font-normal bg-white max-w-[220px]"
+                      >
+                        <option value="ALL">Tất cả xã</option>
+                        {noticeCommuneOptions.map(c => (
+                          <option key={c.code} value={c.code}>[{c.code}] {c.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="flex items-center gap-1 font-bold text-slate-700">
+                      Địa bàn:
+                      <select
+                        value={noticeAreaFilter}
+                        onChange={e => setNoticeAreaFilter(e.target.value)}
+                        className="border border-slate-300 rounded px-2 py-1 font-normal bg-white max-w-[260px]"
+                      >
+                        <option value="ALL">Tất cả địa bàn</option>
+                        {noticeAreaOptions.map(a => (
+                          <option key={a.id} value={a.id}>
+                            {a.areaName} ({a.areaCode}) — {a.completedHouseholds}/{a.totalHouseholds}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <button
+                      type="button"
+                      onClick={handleExportNoticeHouseholds}
+                      className="ml-auto flex items-center gap-1.5 px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded font-bold cursor-pointer"
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5" />
+                      Xuất Excel ({filteredNoticeHouseholds.length} hộ)
+                    </button>
+                  </div>
                   <p className="text-[11px] text-slate-600 mb-2">
                     Danh sách hộ lấy từ bảng kê cục bộ. Firebase chỉ lưu số đếm tiến độ, không lưu thông tin từng hộ.
+                    File Excel có thêm sheet "TongHopDiaBan" liệt kê mọi địa bàn đủ/chưa đủ 10 hộ.
                   </p>
+                  {filteredNoticeHouseholds.length === 0 && (
+                    <p className="text-center text-slate-500 py-6">Không có hộ nào trong xã/địa bàn đã chọn. Vẫn có thể bấm Xuất Excel để xem sheet tổng hợp địa bàn.</p>
+                  )}
                   <table className="w-full text-[11px] border-collapse">
                     <thead className="bg-slate-100 text-slate-800 font-bold sticky top-0">
                       <tr className="text-left">
@@ -1381,7 +1711,7 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
                       </tr>
                     </thead>
                     <tbody>
-                      {progressNoticeHouseholds.map(({ household, area }) => {
+                      {filteredNoticeHouseholds.map(({ household, area }) => {
                         const isComplete =
                           household.surveyStatus === 'DA_HOAN_THANH' ||
                           household.surveyStatus === 'DA_DUYET' ||
