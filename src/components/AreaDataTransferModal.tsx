@@ -40,6 +40,7 @@ interface AreaDataTransferModalProps {
   onApplyWorkPackage: (workPackage: SurveyWorkPackage) => Promise<{
     updatedCount: number;
     newCount: number;
+    replacedCount?: number;
     areaCount: number;
     progressSynced: boolean;
     skippedCount?: number;
@@ -47,6 +48,7 @@ interface AreaDataTransferModalProps {
   onApplySurveyorBackup: (backup: ReturnType<typeof parseSurveyorEntryBackup>) => Promise<{
     updatedCount: number;
     newCount: number;
+    replacedCount?: number;
     areaCount: number;
     progressSynced: boolean;
     skippedCount?: number;
@@ -396,6 +398,8 @@ export default function AreaDataTransferModal({
               areaCount: counts.areaCount,
               success: counts.progressSynced,
               message: `Đã cập nhật ${counts.updatedCount} phiếu hoàn thành từ ${counts.areaCount} địa bàn.` +
+                (counts.newCount ? ` Thêm ${counts.newCount} hộ thay thế mới.` : '') +
+                (counts.replacedCount ? ` Đồng bộ ${counts.replacedCount} thay đổi hộ thay thế.` : '') +
                 (counts.skippedCount ? ` Bỏ qua ${counts.skippedCount} phiếu chưa đạt điều kiện hoặc không khớp.` : '') +
                 (counts.progressSynced ? '' : ' Dữ liệu đã lưu cục bộ nhưng chưa đồng bộ số đếm tiến độ lên Firebase.')
             });
@@ -421,7 +425,8 @@ export default function AreaDataTransferModal({
             );
           }
           const counts = await onApplyWorkPackage(workPackage);
-          const hasImportedRecords = counts.updatedCount + counts.newCount > 0;
+          const replacedCount = counts.replacedCount || 0;
+          const hasImportedRecords = counts.updatedCount + counts.newCount + replacedCount > 0;
           results.push({
             fileName: file.name,
             updatedCount: counts.updatedCount,
@@ -430,6 +435,7 @@ export default function AreaDataTransferModal({
             success: counts.progressSynced && hasImportedRecords,
             message: hasImportedRecords
               ? `Đã cập nhật ${counts.updatedCount} hộ, thêm ${counts.newCount} hộ từ ${counts.areaCount} địa bàn.` +
+              (replacedCount ? ` Đồng bộ ${replacedCount} thay đổi hộ thay thế (hộ dự phòng vào mẫu / hộ mẫu cũ đã thay).` : '') +
               (counts.skippedCount ? ` Bỏ qua ${counts.skippedCount} phiếu chưa hoàn thành hoặc thiếu nội dung.` : '') +
               (counts.progressSynced ? '' : ' Dữ liệu đã lưu cục bộ nhưng chưa đồng bộ số đếm tiến độ lên Firebase.')
               : 'Không có phiếu hoàn thành đủ nội dung để cập nhật.'
