@@ -401,6 +401,10 @@ export default function App() {
 
   // Thay thế hộ mẫu bằng hộ dự phòng cùng địa bàn
   const [householdToReplace, setHouseholdToReplace] = useState<Household | null>(null);
+
+  // Sửa nhanh Họ tên chủ hộ (trường hợp chỉ nhập sai tên, không cần thay hộ)
+  const [householdToRename, setHouseholdToRename] = useState<Household | null>(null);
+  const [renameValue, setRenameValue] = useState<string>('');
   const [selectedBackupHouseholdId, setSelectedBackupHouseholdId] = useState<string>('');
   const [replaceReason, setReplaceReason] = useState<string>('Vắng mặt dài ngày / Đi khỏi địa phương');
   const [customReplaceReason, setCustomReplaceReason] = useState<string>('');
@@ -3910,6 +3914,28 @@ export default function App() {
         }
       }
 
+      // BƯỚC 1b: hộ ĐTV chỉ sửa họ tên chủ hộ (kể cả khi chưa hoàn thành phiếu)
+      for (const incoming of entry.households) {
+        if (!incomingBelongsToEntry(incoming)) continue;
+        if (!String(incoming.note || '').includes('[Sửa họ tên chủ hộ:')) continue;
+        const newName = (incoming.householdHead || '').trim();
+        if (!newName) continue;
+        const idx = householdIndexById.get(incoming.id);
+        if (idx === undefined) continue;
+        const current = nextHouseholds[idx];
+        if (!isInLocalArea(current) || (current.householdHead || '').trim() === newName) continue;
+        const inTime = Date.parse(incoming.updatedAt || workPackage.exportedAt);
+        const curTime = Date.parse(current.updatedAt || '');
+        if (Number.isFinite(inTime) && Number.isFinite(curTime) && inTime < curTime) continue;
+        nextHouseholds[idx] = {
+          ...current,
+          householdHead: newName,
+          note: incoming.note.length >= (current.note || '').length ? incoming.note : current.note,
+          updatedAt: incoming.updatedAt || workPackage.exportedAt
+        };
+        structureChanged = true;
+      }
+
       // BƯỚC 2: nạp phiếu hoàn thành
       for (const incoming of entry.households) {
         if (
@@ -3974,6 +4000,7 @@ export default function App() {
           assignedSurveyorId: resolvedSurveyorId,
           assignedSurveyorName: resolvedSurveyorName,
           surveyStatus: progressStatus,
+          householdHead: (incoming.householdHead || '').trim() || existing.householdHead,
           questionnaire: incoming.questionnaire || existing.questionnaire,
           updatedAt: incoming.updatedAt || workPackage.exportedAt,
           updatedBy: incoming.updatedBy || resolvedSurveyorName,
@@ -5249,6 +5276,38 @@ export default function App() {
   };
 
   // Thay đổi trực tiếp phân loại ngành (1-4) của hộ ngay trên bảng
+  const handleConfirmRename = () => {
+    if (!householdToRename) return;
+    const newName = renameValue.replace(/\s+/g, ' ').trim();
+    if (!newName) {
+      showNotification('error', 'Họ tên chủ hộ không được để trống.');
+      return;
+    }
+    const target = householdToRename;
+    if (newName === (target.householdHead || '').trim()) {
+      setHouseholdToRename(null);
+      return;
+    }
+    const updatedH: Household = {
+      ...target,
+      householdHead: newName,
+      note: (target.note ? `${target.note} | ` : '') + `[Sửa họ tên chủ hộ: "${target.householdHead}" -> "${newName}"]`,
+      updatedBy: currentUser?.name || currentUser?.id || target.updatedBy,
+      updatedAt: new Date().toISOString()
+    };
+    setHouseholds(prev => {
+      const next = prev.map(item => item.id === target.id ? updatedH : item);
+      try { localStorage.setItem('cached_households', JSON.stringify(next)); } catch (e) {}
+      return next;
+    });
+    syncAreaProgressForHouseholds(
+      households.map(item => item.id === target.id ? updatedH : item),
+      [updatedH]
+    );
+    setHouseholdToRename(null);
+    showNotification('success', `Đã sửa họ tên chủ hộ thành "${newName}".`);
+  };
+
   const handleQuickChangeSector = async (householdId: string, newSectorCode: 1 | 2 | 3 | 4) => {
     const newSectorName = SECTOR_NAMES[newSectorCode] || 'Công nghiệp xây dựng';
     setHouseholds(prev => {
@@ -5991,6 +6050,19 @@ export default function App() {
                           >
                             <RefreshCw className="w-3.5 h-3.5" />
                           </button>
+
+                          {/* Nút Sửa họ tên chủ hộ (chỉ sai tên, không cần thay hộ) */}
+                          {!isLocked && (
+                            <button
+                              type="button"
+                              onClick={() => { setHouseholdToRename(h); setRenameValue(h.householdHead || ''); }}
+                              className="p-1.5 text-sky-700 hover:text-sky-900 bg-sky-50 hover:bg-sky-100 rounded border border-sky-300 cursor-pointer shadow-2xs hover:scale-105 transition-all"
+                              title={`Sửa họ tên chủ hộ "${h.householdHead}"`}
+                              aria-label="Sửa họ tên chủ hộ"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
 
                           {/* Nút Xóa trắng / Reset phiếu của riêng hộ này */}
                           <button
@@ -8995,6 +9067,37 @@ export default function App() {
           currentUser={currentUser}
           allSurveyors={surveyors}
         />
+      )}
+
+      {/* MODAL SỬA HỌ TÊN CHỦ HỘ */}
+      {householdToRename && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4" onClick={() => setHouseholdToRename(null)}>
+          <div className="bg-white rounded-lg shadow-xl w-full max-w-md overflow-hidden" onClick={(e) => e.stopPropagation()}>
+            <div className="bg-sky-800 text-white px-4 py-3 flex items-center gap-2">
+              <Edit3 className="w-4 h-4" />
+              <h3 className="font-extrabold text-sm uppercase">Sửa họ tên chủ hộ</h3>
+            </div>
+            <div className="p-4 flex flex-col gap-3">
+              <div className="text-xs text-slate-600">
+                Hộ STT mẫu <b>{householdToRename.sttMau}</b> - ĐB {householdToRename.areaCode}. Chỉ đổi tên, các dữ liệu phiếu đã nhập được giữ nguyên.
+              </div>
+              <div className="text-xs text-slate-500">Tên hiện tại: <b className="text-slate-800">{householdToRename.householdHead}</b></div>
+              <input
+                autoFocus
+                type="text"
+                value={renameValue}
+                onChange={(e) => setRenameValue(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleConfirmRename(); if (e.key === 'Escape') setHouseholdToRename(null); }}
+                className="w-full border border-slate-300 rounded px-3 py-2 text-sm font-semibold focus:outline-none focus:ring-2 focus:ring-sky-500"
+                placeholder="Nhập họ tên chủ hộ đúng"
+              />
+              <div className="flex justify-end gap-2">
+                <button type="button" onClick={() => setHouseholdToRename(null)} className="px-3 py-1.5 text-xs font-bold rounded border border-slate-300 bg-slate-100 hover:bg-slate-200 cursor-pointer">Hủy</button>
+                <button type="button" onClick={handleConfirmRename} className="px-3 py-1.5 text-xs font-bold rounded bg-sky-700 hover:bg-sky-600 text-white cursor-pointer">Lưu họ tên</button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* MODAL THAY THẾ HỘ MẪU ĐIỀU TRA BẰNG HỘ DỰ PHÒNG CÙNG ĐỊA BÀN */}
