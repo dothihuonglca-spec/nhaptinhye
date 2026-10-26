@@ -63,6 +63,8 @@ interface AreaProgressItem {
   localCompletedHouseholds: number;
   /** Thời điểm địa bàn đạt 100% (xấp xỉ theo lần cập nhật cuối); rỗng nếu chưa xong */
   completedAt: string;
+  /** Địa bàn chỉ có trên Firebase, máy/trình duyệt này chưa có bảng kê của địa bàn */
+  cloudOnly?: boolean;
 }
 
 const NO_SURVEYOR_FILTER = '__NO_SURVEYOR__';
@@ -342,7 +344,7 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
       target.set(key, snapshots);
     });
 
-    return effectiveAreas.map(area => {
+    const localItems: AreaProgressItem[] = effectiveAreas.map(area => {
       const commune = communeMap.get(area.communeId) || communeMap.get((area as any).communeCode);
       const communeCode = commune?.communeCode || area.communeCode || '';
       const areaKey = getAreaProgressKey(communeCode, area.code);
@@ -444,7 +446,99 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
           : ''
       };
     });
+
+    // Địa bàn đã có tiến độ trên Firebase nhưng máy/trình duyệt này chưa có bảng kê:
+    // vẫn hiện số liệu chung để Admin/Giám sát nắm tiến độ (bấm xem hộ sẽ báo chưa có bảng kê).
+    const knownAreaKeys = new Set<string>();
+    areas.forEach(a => {
+      const c = communeMap.get(a.communeId) || communeMap.get((a as any).communeCode);
+      const k = getAreaProgressKey(c?.communeCode || a.communeCode, a.code);
+      if (k) knownAreaKeys.add(k);
+    });
+    hhByAreaKey.forEach((_list, k) => knownAreaKeys.add(k));
+    localItems.forEach(item => {
+      const k = getAreaProgressKey(item.communeCode === '---' ? '' : item.communeCode, item.areaCode);
+      if (k) knownAreaKeys.add(k);
+    });
+
+    const canSeeSnapshot = (snap: AreaProgressSnapshot): boolean => {
+      if (!currentUser || currentUser.role === 'ADMIN') return true;
+      if (currentUser.role === 'SURVEYOR') return snap.surveyorId === currentUser.id;
+      const assigned = currentUser.assignedCommunes;
+      if (!assigned || assigned.length === 0 || assigned.includes('ALL')) return true;
+      return assigned.includes(snap.communeId) || assigned.includes(snap.communeCode);
+    };
+
+    const cloudOnlyGroups = new Map<string, AreaProgressSnapshot[]>();
+    cloudProgress.forEach(snap => {
+      const k = getAreaProgressKey(snap.communeCode, snap.areaCode);
+      if (!k || knownAreaKeys.has(k) || !canSeeSnapshot(snap)) return;
+      const list = cloudOnlyGroups.get(k) || [];
+      list.push(snap);
+      cloudOnlyGroups.set(k, list);
+    });
+
+    const cloudOnlyItems: AreaProgressItem[] = [];
+    cloudOnlyGroups.forEach((snaps, k) => {
+      const snap = pickAreaCloudSnapshot(snaps, new Set());
+      if (!snap) return;
+      const total = Math.min(10, Math.max(0, snap.totalHouseholds));
+      const done = Math.min(total, snap.completedHouseholds);
+      const doing = Math.min(total - done, snap.inProgressHouseholds);
+      cloudOnlyItems.push({
+        id: `cloud-${k}`,
+        area: {
+          id: snap.areaId || `cloud-${k}`,
+          communeId: snap.communeId,
+          communeCode: snap.communeCode,
+          code: snap.areaCode,
+          name: snap.areaName || `Địa bàn ${snap.areaCode}`
+        } as SurveyArea,
+        commune: undefined,
+        tkcsCode: '---',
+        tkcsName: '---',
+        communeCode: snap.communeCode || '---',
+        communeName: snap.communeName || '---',
+        areaCode: snap.areaCode,
+        areaName: snap.areaName && snap.areaName.trim() ? snap.areaName.trim() : `Địa bàn ${snap.areaCode}`,
+        assignedSurveyorName: snap.surveyorName || '---',
+        surveyorNames: snap.surveyorName ? [snap.surveyorName] : [],
+        totalHouseholds: total,
+        completedHouseholds: done,
+        inProgressHouseholds: doing,
+        unenteredHouseholds: Math.max(0, total - done - doing),
+        completionRate: total > 0 ? Math.round((done / total) * 100) : 0,
+        householdsList: [],
+        progressSource: 'cloud',
+        progressUpdatedAt: snap.updatedAt || '',
+        localCompletedHouseholds: 0,
+        completedAt: total > 0 && done >= total ? (snap.updatedAt || '') : '',
+        cloudOnly: true
+      });
+    });
+    cloudOnlyItems.sort((a, b) =>
+      a.communeCode.localeCompare(b.communeCode, 'vi') || a.areaCode.localeCompare(b.areaCode, 'vi')
+    );
+
+    return [...localItems, ...cloudOnlyItems];
   }, [areas, communes, households, surveyors, currentUser, cloudProgress]);
+
+  // Máy/trình duyệt này chưa có bảng kê (thường do đăng nhập trên máy hoặc trình duyệt khác)
+  const hasNoLocalRoster = households.length === 0;
+  const cloudOnlyAreaCount = areaProgressList.filter(item => item.cloudOnly).length;
+
+  // Mở chi tiết hộ của địa bàn; nếu máy này chưa có bảng kê của địa bàn thì báo rõ lý do
+  const openAreaDetail = (item: AreaProgressItem) => {
+    if (item.cloudOnly) {
+      showNotification(
+        'error',
+        `Địa bàn ${item.areaName} (${item.areaCode}) - xã ${item.communeName}: máy/trình duyệt này chưa có danh sách bảng kê nên chưa xem được từng hộ. ` +
+        `Hãy cập nhật bảng kê của xã này vào máy/trình duyệt này (tab "1. Tải bảng kê" hoặc "Xuất nhập dữ liệu").`
+      );
+      return;
+    }
+    setSelectedAreaDetail(item);
+  };
 
   // Lọc danh sách theo bộ lọc
   // Mốc "mới": từ lần bấm "Đánh dấu đã xem" gần nhất; chưa bấm lần nào thì tính 24 giờ qua
@@ -854,6 +948,41 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
 
   return (
     <div className="flex flex-col gap-4 w-full pb-10">
+
+      {/* THÔNG BÁO KHI ĐĂNG NHẬP MÁY / TRÌNH DUYỆT KHÁC: CHƯA CÓ BẢNG KÊ TRÊN MÁY NÀY */}
+      {hasNoLocalRoster && (
+        <div className="flex items-start gap-2 rounded border border-amber-400 bg-amber-50 p-3 text-xs text-amber-900">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 text-amber-700" />
+          <div className="flex-1">
+            <div className="font-extrabold">Máy/trình duyệt này chưa có danh sách bảng kê</div>
+            <div className="mt-0.5">
+              Dữ liệu bảng kê và phiếu điều tra được lưu theo từng máy và từng trình duyệt. Nếu bạn vừa đăng nhập trên máy khác hoặc trình duyệt khác,
+              cần cập nhật bảng kê vào máy/trình duyệt này
+              {currentUser.role === 'SURVEYOR'
+                ? ' (liên hệ Admin gửi file dữ liệu địa bàn được giao, rồi nạp vào mục "Xuất nhập dữ liệu") trước khi nhập tin.'
+                : ' (tab "1. Tải bảng kê" hoặc nạp file JSON ở "Xuất nhập dữ liệu").'}
+              {currentUser.role !== 'SURVEYOR' && ' Số liệu tiến độ chung từ Firebase vẫn được hiển thị bên dưới (nếu có), nhưng chưa xem được từng hộ.'}
+            </div>
+            <div className="flex flex-wrap gap-2 mt-2">
+              {currentUser.role === 'ADMIN' && onOpenImportTab && (
+                <button type="button" onClick={onOpenImportTab} className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white font-bold cursor-pointer">Mở tab Tải bảng kê</button>
+              )}
+              {onOpenDataTransfer && (
+                <button type="button" onClick={onOpenDataTransfer} className="px-2.5 py-1 rounded bg-sky-700 hover:bg-sky-600 text-white font-bold cursor-pointer">Mở Xuất nhập dữ liệu</button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      {!hasNoLocalRoster && cloudOnlyAreaCount > 0 && currentUser.role !== 'SURVEYOR' && (
+        <div className="flex items-start gap-2 rounded border border-amber-400 bg-amber-50 p-3 text-xs text-amber-900">
+          <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 text-amber-700" />
+          <div className="flex-1">
+            <b>{cloudOnlyAreaCount} địa bàn</b> đã có tiến độ trên Firebase nhưng máy/trình duyệt này chưa có bảng kê của các địa bàn đó
+            (dòng có nút màu cam "Chưa có bảng kê"). Cần cập nhật bảng kê của các xã này vào máy/trình duyệt này mới xem được từng hộ.
+          </div>
+        </div>
+      )}
       
       {/* ĐỐI CHIẾU FIREBASE ↔ MÁY ADMIN: địa bàn nào đã có trên Firebase nhưng chưa có trên máy */}
       {currentUser.role !== 'SURVEYOR' && (
@@ -1295,17 +1424,19 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
                       <td className="p-2 border border-slate-300 text-center">
                         <button
                           type="button"
-                          onClick={() => setSelectedAreaDetail(item)}
+                          onClick={() => openAreaDetail(item)}
                           disabled={item.totalHouseholds === 0}
                           className={`px-2 py-1 rounded text-[11px] font-bold flex items-center justify-center gap-1 mx-auto transition-all cursor-pointer shadow-2xs ${
-                            item.totalHouseholds > 0
+                            item.cloudOnly
+                              ? 'bg-amber-500 hover:bg-amber-400 text-white active:scale-95'
+                              : item.totalHouseholds > 0
                               ? 'bg-[#058da0] hover:bg-[#047484] text-white active:scale-95'
                               : 'bg-slate-200 text-slate-400 cursor-not-allowed'
                           }`}
-                          title="Xem danh sách chi tiết các hộ của địa bàn này"
+                          title={item.cloudOnly ? 'Máy này chưa có bảng kê của địa bàn' : 'Xem danh sách chi tiết các hộ của địa bàn này'}
                         >
                           <Eye className="w-3 h-3" />
-                          <span>Xem</span>
+                          <span>{item.cloudOnly ? 'Chưa có bảng kê' : 'Xem'}</span>
                         </button>
                       </td>
                     </tr>
@@ -1426,11 +1557,11 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
                           <td className="p-2 text-center">
                             <button
                               type="button"
-                              onClick={() => setSelectedAreaDetail(item)}
-                              className="px-2 py-1 bg-[#058da0] hover:bg-[#047484] text-white rounded text-[11px] font-bold cursor-pointer transition-colors shadow-2xs flex items-center justify-center gap-1 mx-auto"
+                              onClick={() => openAreaDetail(item)}
+                              className={`px-2 py-1 text-white rounded text-[11px] font-bold cursor-pointer transition-colors shadow-2xs flex items-center justify-center gap-1 mx-auto ${item.cloudOnly ? 'bg-amber-500 hover:bg-amber-400' : 'bg-[#058da0] hover:bg-[#047484]'}`}
                             >
                               <Eye className="w-3 h-3" />
-                              <span>Xem</span>
+                              <span>{item.cloudOnly ? 'Chưa có bảng kê' : 'Xem'}</span>
                             </button>
                           </td>
                         </tr>
@@ -1655,8 +1786,8 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
                             <button
                               type="button"
                               onClick={() => {
-                                setProgressNotice(null);
-                                setSelectedAreaDetail(item);
+                                if (!item.cloudOnly) setProgressNotice(null);
+                                openAreaDetail(item);
                               }}
                               className="px-2 py-1 bg-sky-700 hover:bg-sky-600 text-white rounded font-bold cursor-pointer"
                             >
