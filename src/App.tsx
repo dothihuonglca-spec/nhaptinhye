@@ -569,6 +569,21 @@ export default function App() {
     return () => unsubscribe();
   }, [canReadCloudProgress, cloudReloadKey]);
 
+  // Đăng nhập trên máy/trình duyệt khác: bảng kê lưu theo từng máy nên cần báo để cập nhật vào máy này
+  const rosterNoticeShownForRef = useRef<string>('');
+  useEffect(() => {
+    if (!isLoggedIn || !currentSurveyorId) return;
+    if (rosterNoticeShownForRef.current === currentSurveyorId) return;
+    rosterNoticeShownForRef.current = currentSurveyorId;
+    if (households.length === 0) {
+      setNotification({
+        type: 'error',
+        message: 'Máy/trình duyệt này chưa có danh sách bảng kê. Nếu bạn đăng nhập trên máy hoặc trình duyệt khác, cần cập nhật bảng kê vào máy/trình duyệt này (Admin: tab "1. Tải bảng kê"; ĐTV: nhận file dữ liệu từ Admin rồi nạp ở "Xuất nhập dữ liệu").'
+      });
+      setTimeout(() => setNotification(null), 15000);
+    }
+  }, [isLoggedIn, currentSurveyorId, households.length]);
+
   const currentUser: Surveyor = useMemo(() => {
     const found = surveyors.find(s => s.id === currentSurveyorId);
     return found || surveyors[0] || DEFAULT_SURVEYORS[0];
@@ -7091,6 +7106,15 @@ export default function App() {
             communes={communes}
             onOpenDetail={() => setActiveTab('my_progress')}
           />
+        )}
+
+        {activeTab === 'entry' && households.length === 0 && (
+          <div className="rounded border border-amber-400 bg-amber-50 p-3 text-xs text-amber-900 font-semibold">
+            ⚠ Bạn đang dùng máy/trình duyệt khác nên chưa có danh sách bảng kê. Cần cập nhật bảng kê vào máy/trình duyệt này
+            {currentUser.role === 'SURVEYOR'
+              ? ' (nhận file dữ liệu địa bàn từ Admin rồi nạp ở mục "Xuất nhập dữ liệu") trước khi nhập tin.'
+              : ' (tab "1. Tải bảng kê" hoặc "Xuất nhập dữ liệu") trước khi nhập tin.'}
+          </div>
         )}
 
         {activeTab === 'entry' && (
