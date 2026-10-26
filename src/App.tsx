@@ -5806,6 +5806,7 @@ export default function App() {
                   </th>
                 )}
                 <th className="border border-[#047484] px-2 py-2.5 bg-[#058da0] text-white font-semibold sticky top-0">STT Mẫu</th>
+                {showEntryButton && <th className="border border-[#047484] px-2 py-2.5 bg-[#058da0] text-white font-semibold sticky top-0 whitespace-nowrap">Nhập tin / Sửa tên</th>}
                 <th className="border border-[#047484] px-2.5 py-2.5 bg-[#058da0] text-white font-semibold sticky top-0">Mã TKCS</th>
                 <th className="border border-[#047484] px-3 py-2.5 bg-[#058da0] text-white font-semibold text-left sticky top-0">Tên TKCS</th>
                 <th className="border border-[#047484] px-2.5 py-2.5 bg-[#058da0] text-white font-semibold sticky top-0">Mã Xã</th>
@@ -5870,6 +5871,40 @@ export default function App() {
                       </td>
                     )}
                     <td className="border border-slate-300 p-2 text-center text-slate-800 font-medium">{h.sttMau}</td>
+                    {showEntryButton && (
+                      <td className="border border-slate-300 p-2 text-center">
+                        <div className="flex items-center justify-center gap-1.5">
+                          {/* Nút Nhập tin phiếu: biểu tượng kèm tooltip hover */}
+                          <button 
+                            onClick={() => setActiveHouseholdForm(h)}
+                            className={`p-1.5 text-white rounded font-bold flex items-center justify-center cursor-pointer shadow-2xs hover:scale-105 transition-all ${
+                              isLocked 
+                                ? 'bg-slate-700 hover:bg-slate-600' 
+                                : status === 'DA_HOAN_THANH'
+                                ? 'bg-emerald-700 hover:bg-emerald-600'
+                                : 'bg-sky-700 hover:bg-sky-600'
+                            }`}
+                            title={isLocked ? 'Xem phiếu' : 'Nhập tin phiếu'}
+                            aria-label={isLocked ? 'Xem phiếu' : 'Nhập tin phiếu'}
+                          >
+                            {isLocked ? <Eye className="w-3.5 h-3.5" /> : <FileText className="w-3.5 h-3.5" />}
+                          </button>
+
+                          {/* Nút Sửa họ tên chủ hộ (chỉ sai tên, không cần thay hộ) */}
+                          {!isLocked && (
+                            <button
+                              type="button"
+                              onClick={() => { setHouseholdToRename(h); setRenameValue(h.householdHead || ''); }}
+                              className="p-1.5 text-sky-700 hover:text-sky-900 bg-sky-50 hover:bg-sky-100 rounded border border-sky-300 cursor-pointer shadow-2xs hover:scale-105 transition-all"
+                              title={`Sửa họ tên chủ hộ "${h.householdHead}"`}
+                              aria-label="Sửa họ tên chủ hộ"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </td>
+                    )}
                     <td className="border border-slate-300 p-2 text-center text-slate-800 font-medium">{tkcsCodeDisplay}</td>
                     <td className="border border-slate-300 p-2 text-slate-800">{tkcsNameDisplay}</td>
                     <td className="border border-slate-300 p-2 text-center text-slate-800 font-medium">{communeCodeDisplay}</td>
@@ -6031,22 +6066,6 @@ export default function App() {
                     {showEntryButton && (
                       <td className="border border-slate-300 p-2 text-center">
                         <div className="flex items-center justify-center gap-1.5">
-                          {/* Nút Nhập tin phiếu: biểu tượng kèm tooltip hover */}
-                          <button 
-                            onClick={() => setActiveHouseholdForm(h)}
-                            className={`p-1.5 text-white rounded font-bold flex items-center justify-center cursor-pointer shadow-2xs hover:scale-105 transition-all ${
-                              isLocked 
-                                ? 'bg-slate-700 hover:bg-slate-600' 
-                                : status === 'DA_HOAN_THANH'
-                                ? 'bg-emerald-700 hover:bg-emerald-600'
-                                : 'bg-sky-700 hover:bg-sky-600'
-                            }`}
-                            title={isLocked ? 'Xem phiếu' : 'Nhập tin phiếu'}
-                            aria-label={isLocked ? 'Xem phiếu' : 'Nhập tin phiếu'}
-                          >
-                            {isLocked ? <Eye className="w-3.5 h-3.5" /> : <FileText className="w-3.5 h-3.5" />}
-                          </button>
-
                           {/* Nút Thay hộ mẫu: biểu tượng kèm tooltip hover */}
                           <button
                             type="button"
@@ -6065,19 +6084,6 @@ export default function App() {
                           >
                             <RefreshCw className="w-3.5 h-3.5" />
                           </button>
-
-                          {/* Nút Sửa họ tên chủ hộ (chỉ sai tên, không cần thay hộ) */}
-                          {!isLocked && (
-                            <button
-                              type="button"
-                              onClick={() => { setHouseholdToRename(h); setRenameValue(h.householdHead || ''); }}
-                              className="p-1.5 text-sky-700 hover:text-sky-900 bg-sky-50 hover:bg-sky-100 rounded border border-sky-300 cursor-pointer shadow-2xs hover:scale-105 transition-all"
-                              title={`Sửa họ tên chủ hộ "${h.householdHead}"`}
-                              aria-label="Sửa họ tên chủ hộ"
-                            >
-                              <Edit3 className="w-3.5 h-3.5" />
-                            </button>
-                          )}
 
                           {/* Nút Xóa trắng / Reset phiếu của riêng hộ này */}
                           <button
@@ -6139,7 +6145,7 @@ export default function App() {
               })}
               {paginatedHouseholds.length === 0 && (
                 <tr>
-                  <td colSpan={showEntryButton ? 19 : 18} className="text-center py-10 text-slate-500">
+                  <td colSpan={showEntryButton ? 20 : 18} className="text-center py-10 text-slate-500">
                     <div className="flex flex-col items-center justify-center gap-2">
                       <AlertCircle className="w-8 h-8 text-amber-500" />
                       <span className="font-bold text-slate-700">Không tìm thấy hộ gia đình nào theo tiêu chí lọc hiện tại.</span>
