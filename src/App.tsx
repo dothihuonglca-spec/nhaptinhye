@@ -5794,18 +5794,6 @@ export default function App() {
           <table className="w-full border-collapse text-xs text-slate-800 whitespace-nowrap">
             <thead className="sticky top-0 z-20 bg-[#058da0] shadow-xs">
               <tr className="bg-[#058da0] text-white text-center font-bold">
-                {showEntryButton && (
-                  <th className="border border-[#047484] px-2 py-2.5 w-10 text-center bg-[#058da0] text-white font-semibold sticky top-0">
-                    <input 
-                      type="checkbox" 
-                      checked={isAllSelected} 
-                      onChange={handleToggleSelectAll}
-                      className="rounded text-teal-600 w-4 h-4 cursor-pointer"
-                      title="Tích tất cả các hộ trên trang này"
-                    />
-                  </th>
-                )}
-                <th className="border border-[#047484] px-2 py-2.5 bg-[#058da0] text-white font-semibold sticky top-0">STT Mẫu</th>
                 {showEntryButton && <th className="border border-[#047484] px-2 py-2.5 bg-[#058da0] text-white font-semibold sticky top-0 whitespace-nowrap">Nhập tin / Sửa tên</th>}
                 <th className="border border-[#047484] px-2.5 py-2.5 bg-[#058da0] text-white font-semibold sticky top-0">Mã TKCS</th>
                 <th className="border border-[#047484] px-3 py-2.5 bg-[#058da0] text-white font-semibold text-left sticky top-0">Tên TKCS</th>
@@ -5813,10 +5801,8 @@ export default function App() {
                 <th className="border border-[#047484] px-3 py-2.5 bg-[#058da0] text-white font-semibold text-left sticky top-0">Tên Xã</th>
                 <th className="border border-[#047484] px-3 py-2.5 bg-[#058da0] text-white font-semibold sticky top-0">Mã ĐB</th>
                 <th className="border border-[#047484] px-4 py-2.5 bg-[#058da0] text-white font-semibold text-left sticky top-0">Tên Địa bàn</th>
-                <th className="border border-[#047484] px-2.5 py-2.5 bg-[#058da0] text-white font-semibold text-left sticky top-0">Người nhập / ĐTV</th>
                 <th className="border border-[#047484] px-2.5 py-2.5 bg-[#058da0] text-white font-semibold text-center sticky top-0">Trạng thái phiếu</th>
                 <th className="border border-[#047484] px-2 py-2.5 bg-[#058da0] text-white font-semibold sticky top-0">Mẫu</th>
-                <th className="border border-[#047484] px-2 py-2.5 bg-[#058da0] text-white font-semibold sticky top-0">STT gốc</th>
                 <th className="border border-[#047484] px-3 py-2.5 text-left bg-[#058da0] text-white font-semibold sticky top-0">Họ và tên chủ hộ</th>
                 <th className="border border-[#047484] px-3 py-2.5 text-left bg-[#058da0] text-white font-semibold sticky top-0">Địa chỉ của hộ</th>
                 <th className="border border-[#047484] px-2 py-2.5 bg-[#058da0] text-white font-semibold sticky top-0">Nhân khẩu</th>
@@ -5824,6 +5810,7 @@ export default function App() {
                 <th className="border border-[#047484] px-3 py-2.5 text-left bg-[#058da0] text-white font-semibold sticky top-0">Phân loại ngành</th>
                 <th className="border border-[#047484] px-3 py-2.5 text-right bg-[#058da0] text-white font-semibold sticky top-0">Tổng TN (1000đ)</th>
                 {showEntryButton && <th className="border border-[#047484] px-3 py-2.5 bg-[#058da0] text-white font-semibold sticky top-0">Thao tác</th>}
+                <th className="border border-[#047484] px-2.5 py-2.5 bg-[#058da0] text-white font-semibold text-left sticky top-0">Người nhập / ĐTV</th>
               </tr>
             </thead>
             <tbody>
@@ -5857,20 +5844,16 @@ export default function App() {
                 return (
                   <tr 
                     key={h.id} 
+                    onDoubleClick={(e) => {
+                      // Nháy đúp vào dòng = mở phiếu nhập tin (bỏ qua khi nháy vào nút, ô chọn, ô nhập)
+                      if (!showEntryButton) return;
+                      if ((e.target as HTMLElement).closest('button, select, input, textarea, a, option')) return;
+                      window.getSelection()?.removeAllRanges();
+                      setActiveHouseholdForm(h);
+                    }}
+                    title="Nháy đúp để mở phiếu nhập tin"
                     className={`transition-colors ${isRowSelected ? 'bg-sky-100 font-semibold' : 'odd:bg-white even:bg-[#f2fafb] hover:bg-[#e6f6f8]'}`}
                   >
-                    {showEntryButton && (
-                      <td className="border border-slate-300 p-2 text-center">
-                        <input 
-                          type="checkbox" 
-                          checked={isRowSelected} 
-                          onChange={() => handleToggleSelectRow(h.id)}
-                          className="rounded text-sky-600 w-4 h-4 cursor-pointer"
-                          title={`Tích chọn hộ: ${h.householdHead}`}
-                        />
-                      </td>
-                    )}
-                    <td className="border border-slate-300 p-2 text-center text-slate-800 font-medium">{h.sttMau}</td>
                     {showEntryButton && (
                       <td className="border border-slate-300 p-2 text-center">
                         <div className="flex items-center justify-center gap-1.5">
@@ -5914,57 +5897,6 @@ export default function App() {
                     </td>
                     <td className="border border-slate-300 p-2 text-slate-800">
                       {areaNameDisplay}
-                    </td>
-
-                    {/* Surveyor Assignment Column - Interactive Link with Progress Tab */}
-                    <td className="border border-slate-300 p-2 text-left text-slate-800">
-                      {(() => {
-                        const areaSurv = areaSurveyorMap.get(h.areaId) || areaSurveyorMap.get(h.areaCode) || areaSurveyorMap.get(`${h.communeId}_${h.areaCode}`);
-                        const effectiveSurveyorName = h.assignedSurveyorName || areaSurv?.name || '';
-                        
-                        if (!effectiveSurveyorName) {
-                          return <span className="text-slate-400 italic text-[11px]">Chưa phân công</span>;
-                        }
-
-                        return (
-                          <div className="flex items-center gap-1.5 flex-wrap">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                if (selectedSurveyorFilter === effectiveSurveyorName) {
-                                  setSelectedSurveyorFilter('ALL');
-                                  showNotification('success', 'Đã hủy lọc theo ĐTV.');
-                                } else {
-                                  setSelectedSurveyorFilter(effectiveSurveyorName);
-                                  setCurrentPage(1);
-                                  showNotification('success', `Đã lọc danh sách theo Người nhập / ĐTV: "${effectiveSurveyorName}".`);
-                                }
-                              }}
-                              className={`px-2 py-0.5 rounded text-[11px] font-semibold cursor-pointer transition-all flex items-center gap-1 border shadow-2xs ${
-                                selectedSurveyorFilter === effectiveSurveyorName
-                                  ? 'bg-purple-700 text-white border-purple-800 font-bold'
-                                  : 'bg-purple-50 hover:bg-purple-100 text-purple-950 border-purple-200'
-                              }`}
-                              title={`Bấm để ${selectedSurveyorFilter === effectiveSurveyorName ? 'bỏ lọc' : 'lọc danh sách'} theo ĐTV "${effectiveSurveyorName}"`}
-                            >
-                              <UserCheck className={`w-3 h-3 ${selectedSurveyorFilter === effectiveSurveyorName ? 'text-white' : 'text-purple-700'}`} />
-                              <span>{effectiveSurveyorName}</span>
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setActiveTab('surveyor_progress');
-                                showNotification('success', `Đã chuyển sang xem Tiến độ của ĐTV: "${effectiveSurveyorName}".`);
-                              }}
-                              className="p-1 text-slate-400 hover:text-teal-700 hover:bg-teal-50 rounded transition-colors cursor-pointer"
-                              title={`Xem chi tiết tiến độ hoàn thành của "${effectiveSurveyorName}" tại Tab 3: Tiến độ ĐTV`}
-                            >
-                              <TrendingUp className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        );
-                      })()}
                     </td>
 
                     {/* Survey Status Column - Plain Text */}
@@ -6011,7 +5943,6 @@ export default function App() {
                         </span>
                       )}
                     </td>
-                    <td className="border border-slate-300 p-2 text-center text-slate-600">{h.sttGoc}</td>
                     <td className="border border-slate-300 p-2 font-semibold text-slate-900">{h.householdHead}</td>
                     <td className="border border-slate-300 p-2 text-slate-600">{h.address}</td>
                     {/* Số nhân khẩu của hộ */}
@@ -6140,12 +6071,62 @@ export default function App() {
                         </div>
                       </td>
                     )}
+                    {/* Surveyor Assignment Column - Interactive Link with Progress Tab */}
+                    <td className="border border-slate-300 p-2 text-left text-slate-800">
+                      {(() => {
+                        const areaSurv = areaSurveyorMap.get(h.areaId) || areaSurveyorMap.get(h.areaCode) || areaSurveyorMap.get(`${h.communeId}_${h.areaCode}`);
+                        const effectiveSurveyorName = h.assignedSurveyorName || areaSurv?.name || '';
+                        
+                        if (!effectiveSurveyorName) {
+                          return <span className="text-slate-400 italic text-[11px]">Chưa phân công</span>;
+                        }
+
+                        return (
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (selectedSurveyorFilter === effectiveSurveyorName) {
+                                  setSelectedSurveyorFilter('ALL');
+                                  showNotification('success', 'Đã hủy lọc theo ĐTV.');
+                                } else {
+                                  setSelectedSurveyorFilter(effectiveSurveyorName);
+                                  setCurrentPage(1);
+                                  showNotification('success', `Đã lọc danh sách theo Người nhập / ĐTV: "${effectiveSurveyorName}".`);
+                                }
+                              }}
+                              className={`px-2 py-0.5 rounded text-[11px] font-semibold cursor-pointer transition-all flex items-center gap-1 border shadow-2xs ${
+                                selectedSurveyorFilter === effectiveSurveyorName
+                                  ? 'bg-purple-700 text-white border-purple-800 font-bold'
+                                  : 'bg-purple-50 hover:bg-purple-100 text-purple-950 border-purple-200'
+                              }`}
+                              title={`Bấm để ${selectedSurveyorFilter === effectiveSurveyorName ? 'bỏ lọc' : 'lọc danh sách'} theo ĐTV "${effectiveSurveyorName}"`}
+                            >
+                              <UserCheck className={`w-3 h-3 ${selectedSurveyorFilter === effectiveSurveyorName ? 'text-white' : 'text-purple-700'}`} />
+                              <span>{effectiveSurveyorName}</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setActiveTab('surveyor_progress');
+                                showNotification('success', `Đã chuyển sang xem Tiến độ của ĐTV: "${effectiveSurveyorName}".`);
+                              }}
+                              className="p-1 text-slate-400 hover:text-teal-700 hover:bg-teal-50 rounded transition-colors cursor-pointer"
+                              title={`Xem chi tiết tiến độ hoàn thành của "${effectiveSurveyorName}" tại Tab 3: Tiến độ ĐTV`}
+                            >
+                              <TrendingUp className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        );
+                      })()}
+                    </td>
                   </tr>
                 );
               })}
               {paginatedHouseholds.length === 0 && (
                 <tr>
-                  <td colSpan={showEntryButton ? 20 : 18} className="text-center py-10 text-slate-500">
+                  <td colSpan={showEntryButton ? 17 : 16} className="text-center py-10 text-slate-500">
                     <div className="flex flex-col items-center justify-center gap-2">
                       <AlertCircle className="w-8 h-8 text-amber-500" />
                       <span className="font-bold text-slate-700">Không tìm thấy hộ gia đình nào theo tiêu chí lọc hiện tại.</span>
