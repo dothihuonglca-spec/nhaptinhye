@@ -361,18 +361,18 @@ export default function QuestionnaireModal({
                 {calcCell(Math.max(0, num(sb?.col3) - num(sb?.col6)), "text-emerald-800 bg-emerald-50")}
               </tr>
 
-              {/* 9. Tiền được đền bù/hỗ trợ thiệt hại: chỉ nhập cột 3 (cộng thẳng vào thu nhập) */}
+              {/* 9. Tiền được đền bù/hỗ trợ thiệt hại: chỉ nhập ở cột 8 Thu nhập (cộng thẳng vào thu nhập) */}
               <tr className="hover:bg-sky-50">
                 <td className="border border-slate-300 p-1 text-center font-bold bg-slate-50">9</td>
                 <td className="border border-slate-300 p-1 font-semibold whitespace-normal min-w-[200px]">Tiền được đền bù/hỗ trợ thiệt hại về chăn nuôi do dịch bệnh, thiên tai, môi trường</td>
                 {blocked()}
                 {blocked()}
+                {blocked()}
+                {blocked()}
+                {blocked()}
+                {blocked()}
+                {blocked()}
                 {inputCell(q.muc3_denBu, raw => updateQ(prev => ({ ...prev, muc3_denBu: raw === '' ? 0 : Number(raw) })))}
-                {blocked()}
-                {blocked()}
-                {blocked()}
-                {blocked()}
-                {calcCell(denBu, "text-emerald-800 bg-emerald-50")}
               </tr>
             </tbody>
           </table>
