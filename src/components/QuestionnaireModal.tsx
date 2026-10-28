@@ -262,6 +262,125 @@ export default function QuestionnaireModal({
     });
   };
 
+  // Mục 3 - Câu 6 đến 9 (Sản phẩm phụ, Dịch vụ, Săn bắt, Tiền đền bù): bảng đủ cột 1-8 giống phiếu giấy,
+  // ô không phải nhập (dấu × trên phiếu) được tô xám.
+  const renderMuc3ExtraTable = () => {
+    const setField = (obj: 'muc3_sanPhamPhu' | 'muc3_dichVu' | 'muc3_sanBat', col: string, raw: string) =>
+      updateQ(prev => ({
+        ...prev,
+        [obj]: { ...((prev as any)[obj] || {}), [col]: raw === '' ? 0 : Number(raw) }
+      }) as typeof prev);
+    const num = (v: any) => Number(v) || 0;
+    const blocked = () => <td className="border border-slate-300 p-1 text-center text-slate-400 bg-slate-100 font-bold select-none">×</td>;
+    const inputCell = (value: any, onChange: (raw: string) => void) => (
+      <td className="border border-slate-300 p-1">
+        <input
+          type="number"
+          value={num(value) === 0 ? '' : value}
+          onFocus={e => e.target.select()}
+          onChange={e => onChange(e.target.value)}
+          className="w-full p-1 border rounded text-right font-medium"
+        />
+      </td>
+    );
+    const calcCell = (value: number, cls: string = 'text-sky-900 bg-sky-50') => (
+      <td className={`border border-slate-300 p-1 text-right font-bold ${cls}`}>{value.toLocaleString()}</td>
+    );
+
+    const spp = q.muc3_sanPhamPhu as any;
+    const dv = q.muc3_dichVu as any;
+    const sb = q.muc3_sanBat as any;
+    const denBu = num(q.muc3_denBu);
+
+    const sppThu = num(spp?.col1) + num(spp?.col2);
+    const sppChi = num(spp?.col6);
+
+    return (
+      <div className="flex flex-col gap-2 border border-slate-300 rounded p-3 bg-white">
+        <h5 className="font-bold text-slate-800 text-xs uppercase">6 - 9. Sản phẩm phụ, dịch vụ, săn bắt, đánh bẫy và tiền đền bù</h5>
+        <div className="overflow-x-auto border border-slate-300 rounded">
+          <table className="w-full border-collapse text-xs whitespace-nowrap">
+            <thead>
+              <tr className="bg-sky-800 text-white text-center font-bold">
+                <th rowSpan={2} className="border border-sky-900 p-1 w-10">STT</th>
+                <th rowSpan={2} className="border border-sky-900 p-1 text-left min-w-[200px]">Sản phẩm/dịch vụ</th>
+                <th colSpan={3} className="border border-sky-900 p-1 bg-sky-700">Tổng thu (1000đ)</th>
+                <th colSpan={4} className="border border-sky-900 p-1 bg-sky-900">Chi phí (1000đ)</th>
+                <th rowSpan={2} className="border border-sky-900 p-1 bg-emerald-800 w-28 text-right">Thu nhập (1000đ)</th>
+              </tr>
+              <tr className="bg-sky-800 text-white text-center font-semibold text-[11px]">
+                <th className="border border-sky-900 p-1 w-24">1. Bán ra</th>
+                <th className="border border-sky-900 p-1 w-24">2. Để lại dùng</th>
+                <th className="border border-sky-900 p-1 w-24 bg-sky-600 font-bold">3=1+2</th>
+                <th className="border border-sky-900 p-1 w-24">4. Giống</th>
+                <th className="border border-sky-900 p-1 w-24">5. Vật tư/T.ăn</th>
+                <th className="border border-sky-900 p-1 w-24">6. Chi khác</th>
+                <th className="border border-sky-900 p-1 w-24 bg-sky-950 font-bold">7=4+5+6</th>
+              </tr>
+            </thead>
+            <tbody>
+              {/* 6. Sản phẩm phụ chăn nuôi: nhập cột 1, 2, 6 */}
+              <tr className="hover:bg-sky-50">
+                <td className="border border-slate-300 p-1 text-center font-bold bg-slate-50">6</td>
+                <td className="border border-slate-300 p-1 font-semibold">Sản phẩm phụ chăn nuôi</td>
+                {inputCell(spp?.col1, raw => setField('muc3_sanPhamPhu', 'col1', raw))}
+                {inputCell(spp?.col2, raw => setField('muc3_sanPhamPhu', 'col2', raw))}
+                {calcCell(sppThu)}
+                {blocked()}
+                {blocked()}
+                {inputCell(spp?.col6, raw => setField('muc3_sanPhamPhu', 'col6', raw))}
+                {calcCell(sppChi, "text-sky-950 bg-sky-100")}
+                {calcCell(Math.max(0, sppThu - sppChi), "text-emerald-800 bg-emerald-50")}
+              </tr>
+
+              {/* 7. Dịch vụ chăn nuôi: nhập cột 3 và 6 */}
+              <tr className="hover:bg-sky-50">
+                <td className="border border-slate-300 p-1 text-center font-bold bg-slate-50">7</td>
+                <td className="border border-slate-300 p-1 font-semibold">Dịch vụ chăn nuôi</td>
+                {blocked()}
+                {blocked()}
+                {inputCell(dv?.col3, raw => setField('muc3_dichVu', 'col3', raw))}
+                {blocked()}
+                {blocked()}
+                {inputCell(dv?.col6, raw => setField('muc3_dichVu', 'col6', raw))}
+                {calcCell(num(dv?.col6), "text-sky-950 bg-sky-100")}
+                {calcCell(Math.max(0, num(dv?.col3) - num(dv?.col6)), "text-emerald-800 bg-emerald-50")}
+              </tr>
+
+              {/* 8. Săn bắt, đánh bẫy: nhập cột 3 và 6 */}
+              <tr className="hover:bg-sky-50">
+                <td className="border border-slate-300 p-1 text-center font-bold bg-slate-50">8</td>
+                <td className="border border-slate-300 p-1 font-semibold">Săn bắt, đánh bẫy</td>
+                {blocked()}
+                {blocked()}
+                {inputCell(sb?.col3, raw => setField('muc3_sanBat', 'col3', raw))}
+                {blocked()}
+                {blocked()}
+                {inputCell(sb?.col6, raw => setField('muc3_sanBat', 'col6', raw))}
+                {calcCell(num(sb?.col6), "text-sky-950 bg-sky-100")}
+                {calcCell(Math.max(0, num(sb?.col3) - num(sb?.col6)), "text-emerald-800 bg-emerald-50")}
+              </tr>
+
+              {/* 9. Tiền được đền bù/hỗ trợ thiệt hại: chỉ nhập cột 3 (cộng thẳng vào thu nhập) */}
+              <tr className="hover:bg-sky-50">
+                <td className="border border-slate-300 p-1 text-center font-bold bg-slate-50">9</td>
+                <td className="border border-slate-300 p-1 font-semibold whitespace-normal min-w-[200px]">Tiền được đền bù/hỗ trợ thiệt hại về chăn nuôi do dịch bệnh, thiên tai, môi trường</td>
+                {blocked()}
+                {blocked()}
+                {inputCell(q.muc3_denBu, raw => updateQ(prev => ({ ...prev, muc3_denBu: raw === '' ? 0 : Number(raw) })))}
+                {blocked()}
+                {blocked()}
+                {blocked()}
+                {blocked()}
+                {calcCell(denBu, "text-emerald-800 bg-emerald-50")}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    );
+  };
+
   const renderProductionTable = (
     title: string,
     rows: ProductionRow[],
@@ -1023,6 +1142,8 @@ export default function QuestionnaireModal({
                   {renderProductionTable("2. Gia cầm", q.muc3_giaCamRows || [], rows => updateQ(prev => ({ ...prev, muc3_giaCamRows: rows })), 'muc3')}
                   {renderProductionTable("3. Chăn nuôi khác", q.muc3_khacRows || [], rows => updateQ(prev => ({ ...prev, muc3_khacRows: rows })), 'muc3')}
                   {renderProductionTable("4. Sản phẩm không qua giết mổ", q.muc3_khongGietMoRows || [], rows => updateQ(prev => ({ ...prev, muc3_khongGietMoRows: rows })), 'muc3')}
+                  {renderProductionTable("5. Giống gia súc, gia cầm, vật nuôi", q.muc3_giongRows || [], rows => updateQ(prev => ({ ...prev, muc3_giongRows: rows })), 'muc3')}
+                  {renderMuc3ExtraTable()}
                   
                   <div className="bg-emerald-100 p-2.5 rounded border border-emerald-300 flex justify-between items-center font-bold text-emerald-950">
                     <span>TỔNG THU NHẬP MỤC 3:</span>
