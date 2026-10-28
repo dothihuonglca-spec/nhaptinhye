@@ -32,7 +32,8 @@ import MyProgressView, { MyProgressStrip } from './components/MyProgressView';
 import type { CloudStatus } from './components/CloudReconcilePanel';
 import { IndustrialSurveyPage } from './modules/industrialSurvey';
 import bannerImg from './assets/images/background-ngoai-troi-dep_042633251.jpg';
-import { OFFICIAL_COMMUNES_CATALOG } from './data/communesCatalog';
+import { OFFICIAL_COMMUNES_CATALOG, COMMUNE_POPULATION_MAP } from './data/communesCatalog';
+import { extrapolateScope, extrapolateCommune, isHouseholdCountedForAverage, type CommuneInput } from './utils/incomeExtrapolation';
 import { 
   Surveyor, UserRole, SurveyStatus, Department, ROLE_LABELS, SURVEY_STATUS_LABELS 
 } from './types/user';
@@ -3034,10 +3035,41 @@ export default function App() {
       totalMauAll += mTot;
     });
 
-    // Nếu là 1 xã đơn lẻ và có tỷ trọng % định sẵn trong danh mục thì ưu tiên lấy chính xác
+    // Nếu là 1 xã đơn lẻ và có tỷ trọng % định sẵn trong danh mục thì lấy đúng tỷ trọng cố định đó
     const isSingleCommune = tnhScopeCommunes.length === 1;
     const singleCommune = isSingleCommune ? tnhScopeCommunes[0] : null;
     const singleCatalog = singleCommune ? OFFICIAL_COMMUNES_CATALOG.find(item => item.communeCode === singleCommune.communeCode || item.id === singleCommune.id) : null;
+
+    // ===== CÔNG THỨC DUY NHẤT (utils/incomeExtrapolation.ts): dùng chung với màn kiểm soát vĩ mô của Admin =====
+    // Tỷ trọng 4 nhóm của từng xã là số CỐ ĐỊNH lấy từ danh mục; chỉ khi danh mục không có mới tạm lấy theo bảng kê.
+    const communeInputs: CommuneInput[] = tnhScopeCommunes.map(c => {
+      const oc = OFFICIAL_COMMUNES_CATALOG.find(item => item.communeCode === c.communeCode || item.id === c.id);
+      const fixed: [number, number, number, number] = [
+        Number(c.ttNongLamThuySan ?? oc?.ttNongLamThuySan ?? 0) || 0,
+        Number(c.ttCongNghiepXayDung ?? oc?.ttCongNghiepXayDung ?? 0) || 0,
+        Number(c.ttThuongMaiDichVu ?? oc?.ttThuongMaiDichVu ?? 0) || 0,
+        Number(c.ttThuKhacLuong ?? oc?.ttThuKhacLuong ?? 0) || 0
+      ];
+      let weights = fixed;
+      if (fixed.reduce((x, y) => x + y, 0) <= 0) {
+        const bk = [
+          Number(c.bkNongLamThuySan ?? oc?.bkNongLamThuySan ?? 0) || 0,
+          Number(c.bkCongNghiepXayDung ?? oc?.bkCongNghiepXayDung ?? 0) || 0,
+          Number(c.bkThuongMaiDichVu ?? oc?.bkThuongMaiDichVu ?? 0) || 0,
+          Number(c.bkThuKhacLuong ?? oc?.bkThuKhacLuong ?? 0) || 0
+        ];
+        const bkSum = bk.reduce((x, y) => x + y, 0);
+        weights = bk.map(v => (bkSum > 0 ? (v / bkSum) * 100 : 0)) as [number, number, number, number];
+      }
+      return {
+        key: c.id || c.communeCode,
+        population: COMMUNE_POPULATION_MAP[c.communeCode] || (oc as any)?.population || 1,
+        weights,
+        households: officialList.filter(h => h.communeId === c.id || (Boolean(c.communeCode) && h.communeCode === c.communeCode))
+      };
+    });
+    const scope = extrapolateScope(communeInputs);
+    const singleResult = isSingleCommune ? scope.communes[0]?.result : null;
 
     const sectors = [1, 2, 3, 4] as const;
 
@@ -3045,80 +3077,62 @@ export default function App() {
       let bkCount = 0;
       let mauAlloc = 0;
       let percent = 0;
+      const calcBkShare = () => (totalBkAll > 0 ? Number(((bkCount / totalBkAll) * 100).toFixed(2)) : 0);
 
       if (code === 1) {
         bkCount = totalBkS1;
         mauAlloc = totalMauS1;
-        percent = isSingleCommune && singleCommune 
-          ? (singleCommune.ttNongLamThuySan ?? singleCatalog?.ttNongLamThuySan ?? (totalBkAll > 0 ? Number(((bkCount / totalBkAll) * 100).toFixed(2)) : 0))
-          : (totalBkAll > 0 ? Number(((bkCount / totalBkAll) * 100).toFixed(2)) : 0);
+        percent = isSingleCommune && singleCommune ? (singleCommune.ttNongLamThuySan ?? singleCatalog?.ttNongLamThuySan ?? calcBkShare()) : calcBkShare();
       } else if (code === 2) {
         bkCount = totalBkS2;
         mauAlloc = totalMauS2;
-        percent = isSingleCommune && singleCommune 
-          ? (singleCommune.ttCongNghiepXayDung ?? singleCatalog?.ttCongNghiepXayDung ?? (totalBkAll > 0 ? Number(((bkCount / totalBkAll) * 100).toFixed(2)) : 0))
-          : (totalBkAll > 0 ? Number(((bkCount / totalBkAll) * 100).toFixed(2)) : 0);
+        percent = isSingleCommune && singleCommune ? (singleCommune.ttCongNghiepXayDung ?? singleCatalog?.ttCongNghiepXayDung ?? calcBkShare()) : calcBkShare();
       } else if (code === 3) {
         bkCount = totalBkS3;
         mauAlloc = totalMauS3;
-        percent = isSingleCommune && singleCommune 
-          ? (singleCommune.ttThuongMaiDichVu ?? singleCatalog?.ttThuongMaiDichVu ?? (totalBkAll > 0 ? Number(((bkCount / totalBkAll) * 100).toFixed(2)) : 0))
-          : (totalBkAll > 0 ? Number(((bkCount / totalBkAll) * 100).toFixed(2)) : 0);
+        percent = isSingleCommune && singleCommune ? (singleCommune.ttThuongMaiDichVu ?? singleCatalog?.ttThuongMaiDichVu ?? calcBkShare()) : calcBkShare();
       } else if (code === 4) {
         bkCount = totalBkS4;
         mauAlloc = totalMauS4;
-        percent = isSingleCommune && singleCommune 
-          ? (singleCommune.ttThuKhacLuong ?? singleCatalog?.ttThuKhacLuong ?? (totalBkAll > 0 ? Number(((bkCount / totalBkAll) * 100).toFixed(2)) : 0))
-          : (totalBkAll > 0 ? Number(((bkCount / totalBkAll) * 100).toFixed(2)) : 0);
+        percent = isSingleCommune && singleCommune ? (singleCommune.ttThuKhacLuong ?? singleCatalog?.ttThuKhacLuong ?? calcBkShare()) : calcBkShare();
       }
 
-      // KẾT QUẢ ĐIỀU TRA THỰC TẾ:
-      // "Có bao nhiêu tổng hợp đến đó ví dụ trong 1 địa bàn điều tra được 5 hộ tổng 15 nhân khẩu thì lúc tính Thu nhập Bình quân bạn chỉ chia cho 15 người"
+      // Danh sách hộ đã điều tra của nhóm (để xem chi tiết); số liệu bình quân chỉ tính các hộ HỢP LỆ
+      // (nhân khẩu > 0, thu nhập > 0, không dòng nào chi > thu).
       const allSectorList = officialList.filter(h => Number(h.sectorCode) === code);
-      const surveyedSectorList = allSectorList.filter(h => isHouseholdSurveyed(h));
-      
-      // Tổng hợp đúng các hộ đã điều tra
-      const sList = surveyedSectorList;
-      const surveyCount = sList.length;
-      let groupIncome = 0;
-      let groupMembers = 0;
+      const sList = allSectorList.filter(h => isHouseholdSurveyed(h));
+      const pooled = scope.pooled[code - 1];
 
-      sList.forEach(h => {
-        const inc = calculateHouseholdTotalIncome(h).total;
-        groupIncome += inc;
-        groupMembers += (Number(h.membersCount) || 1);
-      });
-
-      // TNBQ đầu người / tháng theo loại hộ (= Tổng TN nhóm / Tổng số nhân khẩu nhóm đã điều tra / 12) (Nghìn đồng)
-      // CHIA ĐÚNG CHO TỔNG SỐ NHÂN KHẨU THỰC TẾ CỦA CÁC HỘ ĐÃ ĐIỀU TRA
-      const perCapitaMonth = groupMembers > 0 ? (groupIncome / groupMembers / 12) : 0;
-      
-      // Suy rộng TNBQ = Tỉ trọng cơ cấu (%) * Thu nhập bình quân đầu người / tháng theo loại hộ
-      const extrapolatedIncomeYear = (percent / 100) * perCapitaMonth;
+      // TNBQ đầu người / tháng của nhóm = Tổng TN các hộ hợp lệ / Tổng nhân khẩu của chính các hộ đó / 12 (nghìn đồng)
+      const perCapitaMonth = pooled.perCapitaYear !== null ? pooled.perCapitaYear / 12 : 0;
+      // Đóng góp của nhóm vào TNBQ chung / tháng (đã chia lại tỷ trọng trên các nhóm có số liệu)
+      const extrapolatedMonth = scope.sectorContributionYear[code] / 12;
+      const single = singleResult ? singleResult.sectors[code - 1] : null;
 
       return {
         code,
         name: SECTOR_NAMES[code],
         bkCount,
         percent,
+        adjustedPercent: single && single.adjustedWeight > 0 ? Number((single.adjustedWeight * 100).toFixed(2)) : null,
         mauAlloc,
         totalSampleInSector: allSectorList.length,
-        surveyCount,
-        groupMembers,
-        groupIncome,
-        extrapolatedIncomeYear: Math.round(extrapolatedIncomeYear),
+        surveyCount: pooled.households,
+        groupMembers: pooled.members,
+        groupIncome: pooled.income,
+        extrapolatedIncomeYear: Math.round(extrapolatedMonth),
         perCapitaMonth: Math.round(perCapitaMonth),
         growthRate: 100.0,
         sList
       };
     });
 
-    // Suy rộng TNBQ toàn xã / TKCS = Tổng cộng (Suy rộng của 4 loại hộ)
-    const overallExtrapolated = sectorData.reduce((acc, s) => acc + s.extrapolatedIncomeYear, 0);
+    // Suy rộng TNBQ toàn phạm vi / tháng = Tổng đóng góp 4 nhóm (đã gộp theo dân số các xã có số liệu)
+    const overallExtrapolated = Math.round(scope.perCapitaMonth);
     const totalSurveyedHH = sectorData.reduce((sum, s) => sum + s.surveyCount, 0);
     const totalMembers = sectorData.reduce((sum, s) => sum + s.groupMembers, 0);
     const totalIncomeAll = sectorData.reduce((acc, s) => acc + s.groupIncome, 0);
-    // Thu nhập bình quân trực tiếp: chia đúng cho tổng số nhân khẩu các hộ đã điều tra
+    // Bình quân trực tiếp (không suy rộng): chia đúng cho tổng nhân khẩu các hộ hợp lệ
     const overallDirectPerCapita = totalMembers > 0 ? Math.round(totalIncomeAll / totalMembers / 12) : 0;
 
     return {
@@ -3133,7 +3147,11 @@ export default function App() {
       overallPerCapitaMonth: overallExtrapolated > 0 ? overallExtrapolated : overallDirectPerCapita,
       overallDirectPerCapita,
       officialList,
-      scopeCommunesCount: tnhScopeCommunes.length
+      scopeCommunesCount: tnhScopeCommunes.length,
+      // Thông tin tạm tính: còn xã chưa có số liệu hoặc xã còn thiếu nhóm hộ
+      scopeIsPartial: scope.isPartial,
+      scopeSurveyedCommunes: scope.surveyedCommunes,
+      scopeMissingCodes: singleResult ? singleResult.missingCodes : []
     };
   }, [tnhScopeCommunes, tnhScopeHouseholds]);
 
@@ -3211,8 +3229,11 @@ export default function App() {
 
         if (isHouseholdSurveyed(h)) {
           surveyedCount++;
+        }
+        // Bình quân chỉ tính hộ hợp lệ: nhân khẩu > 0, thu nhập > 0, không dòng nào chi > thu
+        if (isHouseholdCountedForAverage(h)) {
           totalIncome += calculateHouseholdTotalIncome(h).total;
-          totalMembers += (Number(h.membersCount) || 1);
+          totalMembers += Number(h.membersCount) || 0;
         }
       });
 
@@ -5651,7 +5672,7 @@ export default function App() {
         s.code,
         s.name,
         s.bkCount,
-        `${s.percent}%`,
+        `${s.percent}%{s.adjustedPercent !== null && Math.abs(s.adjustedPercent - Number(s.percent)) > 0.01 && (<span className="block text-[10px] font-semibold text-amber-700" title="Tỷ trọng đã chia lại cho các nhóm có số liệu">→ {s.adjustedPercent}%</span>)}`,
         s.mauAlloc,
         s.surveyCount,
         s.perCapitaMonth,
@@ -7775,6 +7796,20 @@ export default function App() {
                 </div>
               </div>
 
+              {/* Ghi chú công thức và cảnh báo số liệu tạm tính */}
+              <div className="px-4 py-2 bg-amber-50 border-b border-amber-300 text-[11px] text-amber-950 leading-relaxed">
+                <b>Công thức:</b> TNBQ nhóm = Tổng thu nhập các hộ hợp lệ ÷ Tổng nhân khẩu của chính các hộ đó. Suy rộng = Σ (tỷ trọng cố định đã chia lại × TNBQ nhóm) trên các nhóm đã có số liệu;
+                nhiều xã được gộp theo dân số. Chỉ tính hộ có nhân khẩu &gt; 0, thu nhập &gt; 0, không dòng nào chi &gt; thu. Đơn vị: nghìn đồng/người/tháng.
+                {tnhSummary.scopeIsPartial && (
+                  <span className="block font-bold text-amber-800 mt-0.5">
+                    ⚠ SỐ TẠM TÍNH:
+                    {tnhSummary.scopeCommunesCount > 1
+                      ? ` mới có ${tnhSummary.scopeSurveyedCommunes}/${tnhSummary.scopeCommunesCount} xã có số liệu hợp lệ hoặc có xã còn thiếu nhóm hộ.`
+                      : ` chưa có số liệu hợp lệ của nhóm ${tnhSummary.scopeMissingCodes.map(c => SECTOR_NAMES[c as 1 | 2 | 3 | 4]).join(', ')}; tỷ trọng đã được chia lại cho các nhóm còn lại.`}
+                  </span>
+                )}
+              </div>
+
               {/* Table Body / Pivot or 2-Column Split View */}
               {tnhPivotMode ? (
                 <div className="overflow-x-auto max-h-[500px] overflow-y-auto p-4">
@@ -7787,11 +7822,11 @@ export default function App() {
                         <th className="border border-[#047484] p-2.5 w-28 bg-[#047484] text-amber-200">Tổng BK (Hộ)</th>
                         <th className="border border-[#047484] p-2.5 w-28 bg-[#047484] text-emerald-200">Mẫu (Hộ)</th>
                         <th className="border border-[#047484] p-2.5 w-28 bg-[#058da0] text-white">Đã điều tra</th>
-                        <th className="border border-[#047484] p-2.5 w-32 bg-[#035b69] text-cyan-100">TNBQ NLTS (đ/tháng)</th>
-                        <th className="border border-[#047484] p-2.5 w-32 bg-[#035b69] text-cyan-100">TNBQ CNXD (đ/tháng)</th>
-                        <th className="border border-[#047484] p-2.5 w-32 bg-[#035b69] text-cyan-100">TNBQ TMDV (đ/tháng)</th>
-                        <th className="border border-[#047484] p-2.5 w-32 bg-[#035b69] text-cyan-100">TNBQ Khác (đ/tháng)</th>
-                        <th className="border border-[#047484] p-2.5 w-36 bg-[#02444e] text-amber-300 font-black">Suy rộng TNBQ (đ)</th>
+                        <th className="border border-[#047484] p-2.5 w-32 bg-[#035b69] text-cyan-100">TNBQ NLTS (nghìn đ/tháng)</th>
+                        <th className="border border-[#047484] p-2.5 w-32 bg-[#035b69] text-cyan-100">TNBQ CNXD (nghìn đ/tháng)</th>
+                        <th className="border border-[#047484] p-2.5 w-32 bg-[#035b69] text-cyan-100">TNBQ TMDV (nghìn đ/tháng)</th>
+                        <th className="border border-[#047484] p-2.5 w-32 bg-[#035b69] text-cyan-100">TNBQ Khác (nghìn đ/tháng)</th>
+                        <th className="border border-[#047484] p-2.5 w-36 bg-[#02444e] text-amber-300 font-black">Suy rộng TNBQ (nghìn đ/tháng)</th>
                       </tr>
                     </thead>
                     <tbody>
@@ -7804,28 +7839,23 @@ export default function App() {
                         const officialC = cHouseholds.filter(h => h.sampleStatus === 'CHÍNH THỨC' || !h.sampleStatus);
                         const surveyedC = officialC.filter(h => isHouseholdSurveyed(h));
 
-                        const getSectorPerCapita = (sCode: number) => {
-                          const sList = surveyedC.filter(h => Number(h.sectorCode) === sCode);
-                          let inc = 0, mem = 0;
-                          sList.forEach(h => {
-                            inc += calculateHouseholdTotalIncome(h).total;
-                            mem += (Number(h.membersCount) || 1);
-                          });
-                          return mem > 0 ? Math.round(inc / mem / 12) : 0;
+                        // Công thức chung (utils/incomeExtrapolation.ts): tỷ trọng cố định, nhóm chưa có số liệu được bỏ ra và chia lại tỷ trọng
+                        const cWeights: [number, number, number, number] = [
+                          Number(c.ttNongLamThuySan ?? oc?.ttNongLamThuySan ?? 0) || 0,
+                          Number(c.ttCongNghiepXayDung ?? oc?.ttCongNghiepXayDung ?? 0) || 0,
+                          Number(c.ttThuongMaiDichVu ?? oc?.ttThuongMaiDichVu ?? 0) || 0,
+                          Number(c.ttThuKhacLuong ?? oc?.ttThuKhacLuong ?? 0) || 0
+                        ];
+                        const cRes = extrapolateCommune(officialC, cWeights);
+                        const pOf = (code: number) => {
+                          const v = cRes.sectors[code - 1].perCapitaYear;
+                          return v !== null ? Math.round(v / 12) : 0;
                         };
-
-                        const p1 = getSectorPerCapita(1);
-                        const p2 = getSectorPerCapita(2);
-                        const p3 = getSectorPerCapita(3);
-                        const p4 = getSectorPerCapita(4);
-
-                        const tt1 = c.ttNongLamThuySan ?? oc?.ttNongLamThuySan ?? 25;
-                        const tt2 = c.ttCongNghiepXayDung ?? oc?.ttCongNghiepXayDung ?? 25;
-                        const tt3 = c.ttThuongMaiDichVu ?? oc?.ttThuongMaiDichVu ?? 25;
-                        const tt4 = c.ttThuKhacLuong ?? oc?.ttThuKhacLuong ?? 25;
-
-                        const sumW = (tt1 + tt2 + tt3 + tt4) || 100;
-                        const extYear = Math.round(((tt1 * p1 + tt2 * p2 + tt3 * p3 + tt4 * p4) / sumW));
+                        const p1 = pOf(1);
+                        const p2 = pOf(2);
+                        const p3 = pOf(3);
+                        const p4 = pOf(4);
+                        const extYear = Math.round(cRes.perCapitaMonth);
 
                         return (
                           <tr key={c.id || c.communeCode} className="odd:bg-white even:bg-[#f2fafb] hover:bg-[#e6f6f8] transition-colors">
@@ -7837,11 +7867,11 @@ export default function App() {
                             <td className="border border-slate-300 p-2.5 text-center font-medium text-slate-800">
                               {surveyedC.length > 0 ? `${surveyedC.length} hộ` : <span className="text-slate-400 italic">0 hộ</span>}
                             </td>
-                            <td className="border border-slate-300 p-2.5 text-right font-medium text-slate-800">{p1 > 0 ? `${p1.toLocaleString()} đ` : '---'}</td>
-                            <td className="border border-slate-300 p-2.5 text-right font-medium text-slate-800">{p2 > 0 ? `${p2.toLocaleString()} đ` : '---'}</td>
-                            <td className="border border-slate-300 p-2.5 text-right font-medium text-slate-800">{p3 > 0 ? `${p3.toLocaleString()} đ` : '---'}</td>
-                            <td className="border border-slate-300 p-2.5 text-right font-medium text-slate-800">{p4 > 0 ? `${p4.toLocaleString()} đ` : '---'}</td>
-                            <td className="border border-slate-300 p-2.5 text-right font-black text-slate-900 text-sm bg-amber-50">{extYear > 0 ? `${extYear.toLocaleString()} đ` : '0 đ'}</td>
+                            <td className="border border-slate-300 p-2.5 text-right font-medium text-slate-800">{p1 > 0 ? p1.toLocaleString() : '---'}</td>
+                            <td className="border border-slate-300 p-2.5 text-right font-medium text-slate-800">{p2 > 0 ? p2.toLocaleString() : '---'}</td>
+                            <td className="border border-slate-300 p-2.5 text-right font-medium text-slate-800">{p3 > 0 ? p3.toLocaleString() : '---'}</td>
+                            <td className="border border-slate-300 p-2.5 text-right font-medium text-slate-800">{p4 > 0 ? p4.toLocaleString() : '---'}</td>
+                            <td className="border border-slate-300 p-2.5 text-right font-black text-slate-900 text-sm bg-amber-50">{extYear > 0 ? <>{extYear.toLocaleString()}{cRes.isPartial && <span className="block text-[10px] font-semibold text-amber-700" title={`Tạm tính: chưa có số liệu nhóm ${cRes.missingCodes.join(', ')}; tỷ trọng đã được chia lại cho các nhóm còn lại`}>tạm tính</span>}</> : '---'}</td>
                           </tr>
                         );
                       })}
@@ -7871,10 +7901,10 @@ export default function App() {
                             Hộ ĐT
                           </th>
                           <th className="border border-[#047484] p-2.5 w-28 bg-[#035b69] text-emerald-100">
-                            TNBQ/tháng
+                            TNBQ/tháng (nghìn đ)
                           </th>
                           <th className="border border-[#047484] p-2.5 w-32 bg-[#02444e] text-amber-300 font-black">
-                            Suy rộng
+                            Suy rộng/tháng (nghìn đ)
                           </th>
                         </tr>
                       </thead>
@@ -7911,12 +7941,12 @@ export default function App() {
 
                             {/* TNBQ đầu người/tháng theo loại hộ */}
                             <td className="border border-slate-300 p-2.5 text-right font-bold text-slate-900">
-                              {s.perCapitaMonth > 0 ? `${s.perCapitaMonth.toLocaleString()} đ` : '0 đ'}
+                              {s.perCapitaMonth > 0 ? s.perCapitaMonth.toLocaleString() : '---'}
                             </td>
 
                             {/* 4. Suy rộng TNBQ = Tỉ trọng cơ cấu * TNBQ đầu người/tháng theo loại hộ */}
                             <td className="border border-slate-300 p-2.5 text-right font-black text-slate-900 text-sm">
-                              {s.extrapolatedIncomeYear > 0 ? `${s.extrapolatedIncomeYear.toLocaleString()} đ` : '0 đ'}
+                              {s.extrapolatedIncomeYear > 0 ? s.extrapolatedIncomeYear.toLocaleString() : '---'}
                             </td>
                           </tr>
                         ))}
@@ -7944,10 +7974,10 @@ export default function App() {
                             {tnhSummary.totalSurveyedHH} / {tnhSummary.totalHH} hộ ({tnhSummary.totalMembers} ng)
                           </td>
                           <td className="border border-slate-300 p-3 text-right text-emerald-950 font-black bg-emerald-100/40" title={`${tnhSummary.totalMembers} nhân khẩu thực tế điều tra`}>
-                            {tnhSummary.overallDirectPerCapita.toLocaleString()} đ
+                            {tnhSummary.overallDirectPerCapita.toLocaleString()} nghìn đ
                           </td>
                           <td className="border border-slate-300 p-3 text-right text-rose-950 text-base font-black bg-amber-200/80 shadow-inner">
-                            {tnhSummary.overallExtrapolated.toLocaleString()} đ
+                            {tnhSummary.overallExtrapolated.toLocaleString()} nghìn đ
                           </td>
                         </tr>
                       </tbody>
@@ -7971,7 +8001,7 @@ export default function App() {
                       <div className="bg-white p-3 rounded-lg border border-slate-200 shadow-2xs flex flex-col gap-3">
                         <div className="flex items-center justify-center gap-4 text-xs font-semibold text-slate-700 border-b border-slate-100 pb-2">
                           <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 bg-teal-600 rounded-xs inline-block"></span> TNBQ/tháng</span>
-                          <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 bg-amber-500 rounded-xs inline-block"></span> Suy rộng (năm)</span>
+                          <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 bg-amber-500 rounded-xs inline-block"></span> Suy rộng (tháng)</span>
                         </div>
 
                         <div className="flex items-end justify-between gap-1.5 h-44 pt-6 px-1 border-b border-slate-200">
@@ -7991,11 +8021,11 @@ export default function App() {
                                     <div 
                                       className="w-2.5 bg-teal-600 rounded-t transition-all duration-500 group-hover:bg-teal-500 relative flex flex-col items-center"
                                       style={{ height: `${tnbqHeight}%` }}
-                                      title={`${s.name} - TNBQ: ${s.perCapitaMonth.toLocaleString()} đ/tháng`}
+                                      title={`${s.name} - TNBQ: ${s.perCapitaMonth.toLocaleString()} nghìn đ/tháng`}
                                     >
                                       {s.perCapitaMonth > 0 && (
                                         <span className="absolute -top-5 text-[9px] font-bold text-teal-800 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-                                          {Math.round(s.perCapitaMonth / 1000)}k
+                                          {(s.perCapitaMonth / 1000).toFixed(1)}tr
                                         </span>
                                       )}
                                     </div>
@@ -8004,11 +8034,11 @@ export default function App() {
                                     <div 
                                       className="w-2.5 bg-amber-500 rounded-t transition-all duration-500 group-hover:bg-amber-400 relative flex flex-col items-center"
                                       style={{ height: `${extHeight}%` }}
-                                      title={`${s.name} - Suy rộng: ${s.extrapolatedIncomeYear.toLocaleString()} đ/năm`}
+                                      title={`${s.name} - Suy rộng: ${s.extrapolatedIncomeYear.toLocaleString()} nghìn đ/tháng`}
                                     >
                                       {s.extrapolatedIncomeYear > 0 && (
                                         <span className="absolute -top-5 text-[9px] font-bold text-amber-800 opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap">
-                                          {Math.round(s.extrapolatedIncomeYear / 1000000)}tr
+                                          {(s.extrapolatedIncomeYear / 1000).toFixed(1)}tr
                                         </span>
                                       )}
                                     </div>
