@@ -10,6 +10,7 @@ import {
 } from 'lucide-react';
 import { FullQuestionnaire, ProductionRow, NonAgriRow, SalaryRow } from '../types/questionnaire';
 import { calculateFullIncome, calcProductionRowIncome, calcNonAgriRowIncome } from '../utils/incomeCalculator';
+import { validateHouseholdIncome, findNegativeIncomeLines } from '../utils/incomeExtrapolation';
 import CatalogModal, { CatalogSectionType } from './CatalogModal';
 import { CatalogItem } from '../constants/catalogs';
 import { Surveyor, SurveyStatus, SURVEY_STATUS_LABELS } from '../types/user';
@@ -44,7 +45,7 @@ export default function QuestionnaireModal({
     isOpen: boolean;
     title: string;
     message: string;
-    field: 'membersCount' | 'workingMembersCount';
+    field: 'membersCount' | 'workingMembersCount' | 'income';
   } | null>(null);
 
   // Tự động đồng bộ lại form khi chuyển sang hộ khác hoặc mở phiếu mới
@@ -152,6 +153,22 @@ export default function QuestionnaireModal({
       });
       scrollToAndFocus('input-working-members-count');
       return;
+    }
+
+    // 4. Kiểm tra thu nhập: khi Lưu & Hoàn thành / Duyệt, thu nhập hộ phải > 0 và không dòng nào chi > thu
+    const statusToSave = newStatus || form.surveyStatus || 'DANG_NHAP';
+    if (statusToSave === 'DA_HOAN_THANH' || statusToSave === 'DA_DUYET') {
+      const check = validateHouseholdIncome(q);
+      if (!check.ok) {
+        setValidationWarning('Thu nhập hộ chưa hợp lệ (bằng 0 hoặc có dòng chi lớn hơn thu)');
+        setValidationAlertModal({
+          isOpen: true,
+          title: 'Thu nhập chưa hợp lệ - không thể lưu',
+          message: check.message + '\n\nThu nhập của hộ không được bằng 0 hoặc âm. Hãy sửa số liệu rồi bấm lưu lại (có thể bấm "Lưu Nháp" để giữ dữ liệu đang nhập).',
+          field: 'income'
+        });
+        return;
+      }
     }
 
     // Xóa cảnh báo nếu tất cả hợp lệ
@@ -655,6 +672,21 @@ export default function QuestionnaireModal({
             <span className="text-[11px] bg-amber-700/60 px-2 py-0.5 rounded">Cần quyền Admin để mở khóa</span>
           </div>
         )}
+
+        {/* Cảnh báo ngay khi nhập: dòng nào Chi lớn hơn Thu (thu nhập âm) */}
+        {(() => {
+          const negLines = findNegativeIncomeLines(q);
+          if (negLines.length === 0) return null;
+          return (
+            <div className="bg-amber-100 border-b border-amber-400 text-amber-950 px-4 py-2 text-xs font-bold flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-amber-700" />
+              <div>
+                Có {negLines.length} dòng Chi lớn hơn Thu (thu nhập không được âm), cần sửa trước khi Lưu & Hoàn thành:
+                <span className="font-semibold"> {negLines.slice(0, 4).map(i => `${i.section.replace(/ - .*/, '')} - ${i.label}`).join('; ')}{negLines.length > 4 ? '; ...' : ''}</span>
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Validation Warning Alert Banner (Hiện khi người dùng chưa nhập nhân khẩu/người làm việc) */}
         {validationWarning && (
@@ -1627,19 +1659,23 @@ export default function QuestionnaireModal({
               </h3>
             </div>
             <div className="p-5 space-y-4">
-              <div className="bg-rose-50 border border-rose-200 rounded-xl p-3.5 text-xs text-rose-950 leading-relaxed font-semibold">
+              <div className="bg-rose-50 border border-rose-200 rounded-xl p-3.5 text-xs text-rose-950 leading-relaxed font-semibold whitespace-pre-line max-h-72 overflow-y-auto">
                 {validationAlertModal.message}
               </div>
               <button
                 type="button"
                 onClick={() => {
+                  if (validationAlertModal.field === 'income') {
+                    setValidationAlertModal(null);
+                    return;
+                  }
                   const fieldToFocus = validationAlertModal.field === 'membersCount' ? 'input-members-count' : 'input-working-members-count';
                   setValidationAlertModal(null);
                   scrollToAndFocus(fieldToFocus);
                 }}
                 className="w-full py-2.5 px-4 bg-rose-600 hover:bg-rose-700 active:bg-rose-800 text-white font-black rounded-xl text-xs flex items-center justify-center gap-2 cursor-pointer shadow-md hover:shadow-lg transition-all"
               >
-                <span>Về màn hình nhập Nhân khẩu</span>
+                <span>{validationAlertModal.field === 'income' ? 'Quay lại kiểm tra số liệu' : 'Về màn hình nhập Nhân khẩu'}</span>
               </button>
             </div>
           </div>

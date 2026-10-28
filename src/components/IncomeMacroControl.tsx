@@ -16,6 +16,7 @@ import {
   PROVINCE_TOTAL_POPULATION 
 } from '../data/communesCatalog';
 import { calculateFullIncome } from '../utils/incomeCalculator';
+import { extrapolateCommune } from '../utils/incomeExtrapolation';
 import { 
   FileSpreadsheet, 
   Search, 
@@ -93,74 +94,33 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
       // Actual households for this commune
       const cHouseholds = households.filter(h => h.communeCode === communeCode || (Boolean(cCommune?.id) && h.communeId === cCommune?.id));
       const officialHHs = cHouseholds.filter(h => h.sampleStatus === 'CHÍNH THỨC' || !h.sampleStatus);
-      const surveyedHHs = officialHHs.filter(h => isHouseholdSurveyed(h));
 
-      const hasAnySurvey = surveyedHHs.length > 0;
-
-      // Structure % (Tỷ trọng cơ cấu từ danh mục / bảng kê chính thức của từng xã)
+      // Tỷ trọng cố định (dạng 0-1) để hiển thị
       const tt1 = rawTt1 > 0 ? Number((rawTt1 / 100).toFixed(4)) : 0;
       const tt2 = rawTt2 > 0 ? Number((rawTt2 / 100).toFixed(4)) : 0;
       const tt3 = rawTt3 > 0 ? Number((rawTt3 / 100).toFixed(4)) : 0;
       const tt4 = rawTt4 > 0 ? Number((rawTt4 / 100).toFixed(4)) : 0;
 
-      // Group Year Incomes (Nghìn đồng/năm)
-      let groupYearS1: number | null = null;
-      let groupYearS2: number | null = null;
-      let groupYearS3: number | null = null;
-      let groupYearS4: number | null = null;
+      // CÔNG THỨC DUY NHẤT (utils/incomeExtrapolation.ts), dùng chung với tab Nhập tin:
+      // - Chỉ tính hộ hợp lệ (nhân khẩu > 0, thu nhập > 0, không dòng nào chi > thu)
+      // - TNBQ nhóm = Tổng TN / Tổng nhân khẩu của chính các hộ đó
+      // - Nhóm chưa có số liệu được bỏ ra, tỷ trọng chia lại cho các nhóm còn lại
+      const result = extrapolateCommune(officialHHs, [rawTt1, rawTt2, rawTt3, rawTt4]);
 
-      const s1List = surveyedHHs.filter(h => Number(h.sectorCode) === 1);
-      const s2List = surveyedHHs.filter(h => Number(h.sectorCode) === 2);
-      const s3List = surveyedHHs.filter(h => Number(h.sectorCode) === 3);
-      const s4List = surveyedHHs.filter(h => Number(h.sectorCode) === 4);
+      const groupYearS1 = result.sectors[0].perCapitaYear !== null ? Number((result.sectors[0].perCapitaYear as number).toFixed(2)) : null;
+      const groupYearS2 = result.sectors[1].perCapitaYear !== null ? Number((result.sectors[1].perCapitaYear as number).toFixed(2)) : null;
+      const groupYearS3 = result.sectors[2].perCapitaYear !== null ? Number((result.sectors[2].perCapitaYear as number).toFixed(2)) : null;
+      const groupYearS4 = result.sectors[3].perCapitaYear !== null ? Number((result.sectors[3].perCapitaYear as number).toFixed(2)) : null;
 
-      if (s1List.length > 0) {
-        const s1Income = s1List.reduce((acc, h) => acc + calculateFullIncome(h.questionnaire).total, 0);
-        const s1Mem = s1List.reduce((acc, h) => acc + (Number(h.membersCount) || 1), 0);
-        if (s1Mem > 0) groupYearS1 = Math.round(s1Income / s1Mem);
-      }
-
-      if (s2List.length > 0) {
-        const s2Income = s2List.reduce((acc, h) => acc + calculateFullIncome(h.questionnaire).total, 0);
-        const s2Mem = s2List.reduce((acc, h) => acc + (Number(h.membersCount) || 1), 0);
-        if (s2Mem > 0) groupYearS2 = Math.round(s2Income / s2Mem);
-      }
-
-      if (s3List.length > 0) {
-        const s3Income = s3List.reduce((acc, h) => acc + calculateFullIncome(h.questionnaire).total, 0);
-        const s3Mem = s3List.reduce((acc, h) => acc + (Number(h.membersCount) || 1), 0);
-        if (s3Mem > 0) groupYearS3 = Math.round(s3Income / s3Mem);
-      }
-
-      if (s4List.length > 0) {
-        const s4Income = s4List.reduce((acc, h) => acc + calculateFullIncome(h.questionnaire).total, 0);
-        const s4Mem = s4List.reduce((acc, h) => acc + (Number(h.membersCount) || 1), 0);
-        if (s4Mem > 0) groupYearS4 = Math.round(s4Income / s4Mem);
-      }
-
-      // Per Capita Income Year & Month (Formula-based, dynamic)
-      let perCapitaYear = 0;
-      let perCapitaMonth = 0;
-
-      let sumProducts = 0;
-      let sumWeights = 0;
-
-      if (tt1 > 0 && groupYearS1 !== null) { sumProducts += tt1 * groupYearS1; sumWeights += tt1; }
-      if (tt2 > 0 && groupYearS2 !== null) { sumProducts += tt2 * groupYearS2; sumWeights += tt2; }
-      if (tt3 > 0 && groupYearS3 !== null) { sumProducts += tt3 * groupYearS3; sumWeights += tt3; }
-      if (tt4 > 0 && groupYearS4 !== null) { sumProducts += tt4 * groupYearS4; sumWeights += tt4; }
-
-      if (sumWeights > 0) {
-        // Mathematically sound and precise weighted extrapolation formula
-        perCapitaYear = Number((sumProducts / sumWeights).toFixed(2));
-        perCapitaMonth = Number((perCapitaYear / 12).toFixed(2));
-      }
+      const perCapitaYear = Number(result.perCapitaYear.toFixed(2));
+      const perCapitaMonth = Number(result.perCapitaMonth.toFixed(2));
 
       // Macro Local Funds:
-      // Q = O * D (Nghìn đồng/năm)
-      const totalLocalIncomeYear = Math.round(perCapitaYear * population);
+      // Q = O * D (Nghìn đồng/năm) - giữ nguyên số chưa làm tròn để gộp tỉnh chính xác
+      const fundYearRaw = result.perCapitaYear * population;
+      const totalLocalIncomeYear = Math.round(fundYearRaw);
       // R = P * D (Nghìn đồng/tháng)
-      const totalLocalIncomeMonth = Math.round(perCapitaMonth * population);
+      const totalLocalIncomeMonth = Math.round(fundYearRaw / 12);
 
       return {
         stt: index + 1,
@@ -190,10 +150,13 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
         // Tổng thu nhập địa phương
         totalLocalIncomeYear,
         totalLocalIncomeMonth,
-        // Điều tra thực tế
-        surveyedCount: surveyedHHs.length,
+        fundYearRaw,
+        // Điều tra thực tế (chỉ tính hộ hợp lệ)
+        surveyedCount: result.countedHouseholds,
         totalSample: officialHHs.length,
-        hasSurveyData: surveyedHHs.length > 0
+        hasSurveyData: result.hasData,
+        isPartial: result.isPartial,
+        missingCodes: result.missingCodes
       };
     });
   }, [communes, households]);
@@ -201,16 +164,21 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
   // Province Totals (Dòng Toàn Tỉnh)
   const provinceSummary = useMemo(() => {
     const totalPop = PROVINCE_TOTAL_POPULATION; // 3,256,389
-    const totalYearFund = macroRows.reduce((acc, r) => acc + r.totalLocalIncomeYear, 0);
-    const totalMonthFund = macroRows.reduce((acc, r) => acc + r.totalLocalIncomeMonth, 0);
-    
-    const avgYear = totalPop > 0 ? Number((totalYearFund / totalPop).toFixed(2)) : 0;
-    const avgMonth = totalPop > 0 ? Number((totalMonthFund / totalPop).toFixed(2)) : 0;
+    // Chỉ gộp các xã ĐÃ CÓ số liệu hợp lệ: Tổng(TNBQ xã x dân số xã) / Tổng dân số của các xã đó
+    const surveyedRows = macroRows.filter(r => r.hasSurveyData);
+    const surveyedPop = surveyedRows.reduce((acc, r) => acc + r.population, 0);
+    const fundYearRaw = surveyedRows.reduce((acc, r) => acc + r.fundYearRaw, 0);
+    const totalYearFund = Math.round(fundYearRaw);
+    const totalMonthFund = Math.round(fundYearRaw / 12);
+
+    const avgYear = surveyedPop > 0 ? Number((fundYearRaw / surveyedPop).toFixed(2)) : 0;
+    const avgMonth = surveyedPop > 0 ? Number((fundYearRaw / surveyedPop / 12).toFixed(2)) : 0;
     const totalSurveyedHHs = macroRows.reduce((acc, r) => acc + r.surveyedCount, 0);
     const totalSampleHHs = macroRows.reduce((acc, r) => acc + r.totalSample, 0);
 
     return {
       totalPop,
+      surveyedPop,
       totalYearFund,
       totalMonthFund,
       avgYear,
@@ -218,7 +186,8 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
       targetMonth: avgMonth,
       totalSurveyedHHs,
       totalSampleHHs,
-      surveyedCommunesCount: macroRows.filter(r => r.hasSurveyData).length
+      surveyedCommunesCount: surveyedRows.length,
+      isPartial: surveyedRows.length < macroRows.length || surveyedRows.some(r => r.isPartial)
     };
   }, [macroRows]);
 
@@ -410,7 +379,9 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
           <div className="bg-white/10 backdrop-blur-xs rounded-lg p-3 border border-white/10">
             <div className="flex items-center justify-between text-amber-300 text-xs font-semibold mb-1">
               <span className="flex items-center gap-1.5"><TrendingUp className="w-3.5 h-3.5" /> TNBQ Toàn Tỉnh (Tháng)</span>
-              <span className="text-[10px] bg-amber-800/80 px-1.5 py-0.2 rounded text-amber-100">Chuẩn điều tra</span>
+              <span className="text-[10px] bg-amber-800/80 px-1.5 py-0.2 rounded text-amber-100" title={`Tính trên ${provinceSummary.surveyedCommunesCount}/${macroRows.length} xã đã có số liệu hợp lệ (dân số ${provinceSummary.surveyedPop.toLocaleString('vi-VN')} người)`}>
+                {provinceSummary.isPartial ? `Tạm tính ${provinceSummary.surveyedCommunesCount}/${macroRows.length} xã` : 'Chuẩn điều tra'}
+              </span>
             </div>
             <div className="text-xl md:text-2xl font-black text-amber-300">
               {provinceSummary.avgMonth.toLocaleString('vi-VN')} <span className="text-xs font-normal text-amber-100">nghìn đ/người/tháng</span>
