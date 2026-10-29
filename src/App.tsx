@@ -33,7 +33,7 @@ import type { CloudStatus } from './components/CloudReconcilePanel';
 import { IndustrialSurveyPage } from './modules/industrialSurvey';
 import bannerImg from './assets/images/background-ngoai-troi-dep_042633251.jpg';
 import { OFFICIAL_COMMUNES_CATALOG, COMMUNE_POPULATION_MAP } from './data/communesCatalog';
-import { extrapolateScope, extrapolateCommune, isHouseholdCountedForAverage, type CommuneInput } from './utils/incomeExtrapolation';
+import { extrapolateScope, extrapolateCommune, isHouseholdCountedForAverage, validateHouseholdIncome, type CommuneInput } from './utils/incomeExtrapolation';
 import { 
   Surveyor, UserRole, SurveyStatus, Department, ROLE_LABELS, SURVEY_STATUS_LABELS 
 } from './types/user';
@@ -65,7 +65,8 @@ import {
   parseReplacementNote,
   sameHouseholdName,
   findHouseholdBySourceKey,
-  markOriginalAsReplaced
+  markOriginalAsReplaced,
+  type IncompleteHouseholdInfo
 } from './utils/areaDataTransfer';
 import {
   loadPreRestoreSnapshot,
@@ -3817,10 +3818,16 @@ export default function App() {
     let addedReplacementCount = 0;
     let markedReplacedCount = 0;
     let updatedStructureCount = 0;
+    let partialImportedCount = 0;
+    // Danh sách hộ chính thức chưa hoàn thành hoặc còn thiếu thông tin để báo cho Admin
+    const incompleteHouseholds: IncompleteHouseholdInfo[] = [];
+    // Các lỗi theo từng địa bàn/hộ: một hộ lỗi không được làm mất cả địa bàn hay cả file
+    const importProblems: string[] = [];
     const userDepartment = departments.find(department =>
       department.id === currentUser.departmentId || department.name === currentUser.department
     );
     for (const entry of workPackage.entries) {
+      try {
       const exactSurveyor = surveyors.find(surveyor =>
         surveyor.id === entry.surveyorId && surveyor.role === 'SURVEYOR'
       );
@@ -3992,12 +3999,26 @@ export default function App() {
       }
 
       // BƯỚC 2: nạp phiếu hoàn thành
+      const entryLabel = `${entry.commune.communeName || entry.commune.communeCode} - ĐB ${entry.area.code}`;
+      const noteIncomplete = (incoming: Household, status: string, reasons: string[]) => {
+        // Chỉ báo các hộ CHÍNH THỨC (hộ dự phòng chưa dùng, hộ đã thay thế không cần báo)
+        if (!isOfficialSampleStatus(incoming.sampleStatus)) return;
+        incompleteHouseholds.push({
+          communeName: entry.commune.communeName || entry.commune.communeCode,
+          areaCode: entry.area.code,
+          sttMau: String(incoming.sttMau ?? ''),
+          householdHead: incoming.householdHead || '',
+          surveyorName: resolvedSurveyorName,
+          status,
+          reasons
+        });
+      };
       for (const incoming of entry.households) {
-        if (
-          !isCompletedSurveyStatus(incoming.surveyStatus) ||
-          !incoming.questionnaire ||
-          !hasCompletedSurveyContent(incoming.questionnaire)
-        ) {
+        const hasContent = Boolean(incoming.questionnaire) && hasCompletedSurveyContent(incoming.questionnaire);
+        const isCompletedIncoming = isCompletedSurveyStatus(incoming.surveyStatus) && hasContent;
+        const isPartialIncoming = !isCompletedIncoming && hasContent;
+        if (!isCompletedIncoming && !isPartialIncoming) {
+          noteIncomplete(incoming, 'Chưa nhập', ['Chưa nhập thông tin phiếu']);
           skippedIncompleteCount++;
           continue;
         }
@@ -4007,12 +4028,14 @@ export default function App() {
             incoming.communeCode === entry.commune.communeCode
           ));
         if (!belongsToEntry) {
-          throw new Error(`Hộ ${incoming.sttMau || incoming.id} không thuộc địa bàn ${entry.area.code} trong gói kết quả.`);
+          importProblems.push(`${entryLabel}: hộ ${incoming.sttMau || incoming.id} không thuộc địa bàn này, đã bỏ qua hộ đó.`);
+          continue;
         }
 
         const householdIndex = findIncomingIndex(incoming);
         if (householdIndex < 0) {
-          throw new Error(`Không khớp được hộ ${incoming.sttMau || incoming.id} trong bảng kê địa bàn ${localArea.code}.`);
+          importProblems.push(`${entryLabel}: không khớp được hộ ${incoming.sttMau || incoming.id} (${incoming.householdHead || ''}) trong bảng kê, đã bỏ qua hộ đó.`);
+          continue;
         }
         const existing = nextHouseholds[householdIndex];
         if (
@@ -4022,7 +4045,8 @@ export default function App() {
             existing.communeCode === localCommune.communeCode
           ))
         ) {
-          throw new Error(`Hộ ${incoming.sttMau || incoming.id} khớp với một địa bàn khác trong bảng kê.`);
+          importProblems.push(`${entryLabel}: hộ ${incoming.sttMau || incoming.id} khớp với địa bàn khác trong bảng kê, đã bỏ qua hộ đó.`);
+          continue;
         }
         const existingNameMatches = normalizeSurveyorName(existing.assignedSurveyorName || '') ===
           normalizeSurveyorName(resolvedSurveyorName);
@@ -4033,7 +4057,15 @@ export default function App() {
           (!existing.assignedSurveyorId && existing.assignedSurveyorName && !existingNameMatches) ||
           (incoming.assignedSurveyorId && incoming.assignedSurveyorId !== entry.surveyorId && !incomingNameMatches)
         ) {
-          throw new Error(`Hộ ${existing.sttMau || existing.id} đang thuộc ĐTV khác với gói kết quả.`);
+          importProblems.push(`${entryLabel}: hộ ${existing.sttMau || existing.id} đang thuộc ĐTV khác với gói kết quả, đã bỏ qua hộ đó.`);
+          continue;
+        }
+        const existingIsCompleted = isCompletedSurveyStatus(existing.surveyStatus) &&
+          hasCompletedSurveyContent(existing.questionnaire);
+        // Hộ đang nhập dở KHÔNG được ghi đè lên phiếu đã hoàn thành sẵn có trên máy Admin
+        if (isPartialIncoming && existingIsCompleted) {
+          noteIncomplete(incoming, 'Đang nhập dở', ['Phiếu trong file chưa hoàn thành (Admin đang giữ bản hoàn thành, không bị ghi đè)']);
+          continue;
         }
         const incomingTime = Date.parse(incoming.updatedAt || workPackage.exportedAt);
         const existingTime = Date.parse(existing.updatedAt || '');
@@ -4041,21 +4073,25 @@ export default function App() {
           Number.isFinite(existingTime) &&
           Number.isFinite(incomingTime) &&
           incomingTime < existingTime &&
-          isCompletedSurveyStatus(existing.surveyStatus) &&
-          hasCompletedSurveyContent(existing.questionnaire)
+          existingIsCompleted
         ) {
           continue;
         }
         const incomingStatus = String(incoming.surveyStatus || '').toUpperCase();
-        const progressStatus: SurveyStatus = incomingStatus === 'DA_DUYET'
-          ? 'DA_DUYET'
-          : 'DA_HOAN_THANH';
+        const progressStatus: SurveyStatus = isPartialIncoming
+          ? 'DANG_NHAP'
+          : incomingStatus === 'DA_DUYET'
+            ? 'DA_DUYET'
+            : 'DA_HOAN_THANH';
         nextHouseholds[householdIndex] = {
           ...existing,
           assignedSurveyorId: resolvedSurveyorId,
           assignedSurveyorName: resolvedSurveyorName,
           surveyStatus: progressStatus,
           householdHead: (incoming.householdHead || '').trim() || existing.householdHead,
+          membersCount: incoming.membersCount ?? existing.membersCount,
+          workingMembersCount: incoming.workingMembersCount ?? existing.workingMembersCount,
+          membersCountEntered: incoming.membersCountEntered ?? existing.membersCountEntered,
           questionnaire: incoming.questionnaire || existing.questionnaire,
           updatedAt: incoming.updatedAt || workPackage.exportedAt,
           updatedBy: incoming.updatedBy || resolvedSurveyorName,
@@ -4064,7 +4100,21 @@ export default function App() {
         householdIndexById.set(existing.id, householdIndex);
         householdIndexById.set(incoming.id, householdIndex);
         householdIndexByCompositeKey.set(householdCompositeKey(existing), householdIndex);
-        updatedCount++;
+        if (isPartialIncoming) {
+          partialImportedCount++;
+          noteIncomplete(incoming, 'Đang nhập dở', ['Đang nhập dở, chưa bấm Lưu & Hoàn thành']);
+        } else {
+          updatedCount++;
+          // Hộ đã hoàn thành nhưng còn thiếu thông tin / số liệu chưa hợp lệ: vẫn nạp nhưng báo cho Admin
+          const reasons: string[] = [];
+          if (!(Number(incoming.membersCount) > 0)) reasons.push('Thiếu số nhân khẩu');
+          const check = validateHouseholdIncome(incoming.questionnaire);
+          if (!check.ok) {
+            if (check.issues.length > 0) reasons.push(`Có ${check.issues.length} dòng chi lớn hơn thu`);
+            if (check.total <= 0) reasons.push('Tổng thu nhập bằng 0');
+          }
+          if (reasons.length > 0) noteIncomplete(incoming, 'Thiếu thông tin / số liệu chưa hợp lệ', reasons);
+        }
         updatedEntryCount++;
       }
       if (updatedEntryCount > 0 || structureChanged) {
@@ -4076,6 +4126,15 @@ export default function App() {
           surveyorName: resolvedSurveyorName
         });
       }
+      } catch (entryErr) {
+        // Một địa bàn lỗi không làm mất kết quả các địa bàn còn lại trong file
+        importProblems.push(`${entry.commune?.communeName || ''} - ĐB ${entry.area?.code || ''}: ${entryErr instanceof Error ? entryErr.message : String(entryErr)}`);
+      }
+    }
+
+    // Không nạp được gì và có lỗi: báo lỗi như trước để Admin biết nguyên nhân
+    if (processedAreas.size === 0 && updatedCount === 0 && partialImportedCount === 0 && importProblems.length > 0 && updatedStructureCount === 0 && markedReplacedCount === 0 && addedReplacementCount === 0) {
+      throw new Error(importProblems.slice(0, 3).join(' | '));
     }
 
     householdsRef.current = nextHouseholds;
@@ -4119,7 +4178,10 @@ export default function App() {
         getAreaProgressKey(item.commune.communeCode, item.area.code)
       )).size,
       progressSynced,
-      skippedCount: skippedIncompleteCount
+      skippedCount: skippedIncompleteCount,
+      partialCount: partialImportedCount,
+      incompleteHouseholds,
+      problems: importProblems
     };
   };
 
