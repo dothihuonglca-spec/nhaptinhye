@@ -3656,7 +3656,22 @@ export default function App() {
     }
   };
 
+  // Bản mới nhất của dữ liệu khi nạp NHIỀU file JSON liên tiếp: mỗi file phải đọc kết quả của file nạp ngay trước nó.
+  // (Nếu đọc thẳng state của lần render hiện tại thì file sau sẽ ghi đè mất kết quả file trước => thiếu địa bàn.)
+  const communesRef = useRef<Commune[]>(communes);
+  const areasRef = useRef<SurveyArea[]>(areas);
+  const householdsRef = useRef<Household[]>(households);
+  const surveyorsRef = useRef<Surveyor[]>(surveyors);
+  communesRef.current = communes;
+  areasRef.current = areas;
+  householdsRef.current = households;
+  surveyorsRef.current = surveyors;
+
   const handleApplyWorkPackage = async (workPackage: SurveyWorkPackage) => {
+    const communes = communesRef.current;
+    const areas = areasRef.current;
+    const households = householdsRef.current;
+    const surveyors = surveyorsRef.current;
     if (workPackage.purpose === 'ASSIGNMENT') {
       if (currentUser.role !== 'SURVEYOR') {
         throw new Error('Chỉ tài khoản điều tra viên mới được nạp gói phân công.');
@@ -3761,6 +3776,10 @@ export default function App() {
       const nextSurveyors = surveyors.map(surveyor =>
         surveyor.id === currentUser.id ? updatedSurveyor : surveyor
       );
+      communesRef.current = nextCommunes;
+      areasRef.current = nextAreas;
+      householdsRef.current = nextHouseholds;
+      surveyorsRef.current = nextSurveyors;
       setCommunes(nextCommunes);
       setAreas(nextAreas);
       setHouseholds(nextHouseholds);
@@ -4059,6 +4078,7 @@ export default function App() {
       }
     }
 
+    householdsRef.current = nextHouseholds;
     setHouseholds(nextHouseholds);
     let progressSynced = true;
     try {
@@ -4104,6 +4124,10 @@ export default function App() {
   };
 
   const handleApplySurveyorBackup = async (backup: SurveyorEntryBackup) => {
+    const communes = communesRef.current;
+    const areas = areasRef.current;
+    const households = householdsRef.current;
+    const surveyors = surveyorsRef.current;
     if (currentUser.role !== 'ADMIN') {
       throw new Error('Chỉ Admin mới được nhập file backup phiếu ĐTV để cập nhật tiến độ.');
     }
@@ -4453,6 +4477,7 @@ export default function App() {
     }
 
     await saveLocalDataSnapshot({ communes, areas, households: nextHouseholds, surveyors, departments });
+    householdsRef.current = nextHouseholds;
     setHouseholds(nextHouseholds);
     const householdsByAreaKey = new Map<string, Household[]>();
     nextHouseholds.forEach(household => {
