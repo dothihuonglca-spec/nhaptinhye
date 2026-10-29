@@ -16,7 +16,8 @@ import {
   parseSurveyWorkPackage,
   isAreaAssigned,
   normalizeSurveyorName,
-  SurveyWorkPackage
+  SurveyWorkPackage,
+  type IncompleteHouseholdInfo
 } from '../utils/areaDataTransfer';
 import { parseSurveyorEntryBackup } from '../utils/localDataBackup';
 
@@ -44,6 +45,9 @@ interface AreaDataTransferModalProps {
     areaCount: number;
     progressSynced: boolean;
     skippedCount?: number;
+    partialCount?: number;
+    incompleteHouseholds?: IncompleteHouseholdInfo[];
+    problems?: string[];
   }>;
   onApplySurveyorBackup: (backup: ReturnType<typeof parseSurveyorEntryBackup>) => Promise<{
     updatedCount: number;
@@ -99,6 +103,9 @@ export default function AreaDataTransferModal({
     success: boolean;
     message: string;
   }[]>([]);
+  // Hộ chính thức chưa hoàn thành / còn thiếu thông tin và các lỗi theo địa bàn của lần nạp vừa rồi
+  const [incompleteList, setIncompleteList] = useState<IncompleteHouseholdInfo[]>([]);
+  const [problemList, setProblemList] = useState<string[]>([]);
   const [isProcessingImport, setIsProcessingImport] = useState(false);
 
   const areasBySurveyorId = useMemo(() => {
@@ -354,7 +361,41 @@ export default function AreaDataTransferModal({
     }
     setImportedFiles(readFiles);
     setImportResults([]);
+    setIncompleteList([]);
+    setProblemList([]);
   };
+
+  // Tải danh sách hộ chưa hoàn thành / thiếu thông tin ra file CSV (mở được bằng Excel)
+  const handleDownloadIncompleteList = () => {
+    const esc = (v: string) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+    const header = ['Xã/Phường', 'Địa bàn', 'STT mẫu', 'Chủ hộ', 'ĐTV', 'Tình trạng', 'Nội dung còn thiếu'];
+    const lines = [header.map(esc).join(',')];
+    incompleteList.forEach(h => {
+      lines.push([h.communeName, h.areaCode, h.sttMau, h.householdHead, h.surveyorName, h.status, h.reasons.join('; ')].map(esc).join(','));
+    });
+    problemList.forEach(p => lines.push(['', '', '', '', '', 'Không nạp được', p].map(esc).join(',')));
+    const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `Ho_chua_hoan_thanh_${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  // Gom danh sách hộ chưa hoàn thành theo địa bàn để hiển thị
+  const incompleteByArea = useMemo(() => {
+    const map = new Map<string, IncompleteHouseholdInfo[]>();
+    incompleteList.forEach(h => {
+      const key = `${h.communeName} - ĐB ${h.areaCode} (ĐTV: ${h.surveyorName})`;
+      const list = map.get(key) || [];
+      list.push(h);
+      map.set(key, list);
+    });
+    return Array.from(map.entries());
+  }, [incompleteList]);
 
   // Thực hiện tổng hợp / nạp các file JSON
   const handleExecuteImport = async () => {
@@ -365,6 +406,8 @@ export default function AreaDataTransferModal({
 
     setIsProcessingImport(true);
     const results: typeof importResults = [];
+    const allIncomplete: IncompleteHouseholdInfo[] = [];
+    const allProblems: string[] = [];
 
     try {
       for (const { file, text } of importedFiles) {
@@ -426,7 +469,10 @@ export default function AreaDataTransferModal({
           }
           const counts = await onApplyWorkPackage(workPackage);
           const replacedCount = counts.replacedCount || 0;
-          const hasImportedRecords = counts.updatedCount + counts.newCount + replacedCount > 0;
+          const partialCount = counts.partialCount || 0;
+          if (counts.incompleteHouseholds) allIncomplete.push(...counts.incompleteHouseholds);
+          if (counts.problems) allProblems.push(...counts.problems.map(p => `${file.name}: ${p}`));
+          const hasImportedRecords = counts.updatedCount + counts.newCount + replacedCount + partialCount > 0;
           results.push({
             fileName: file.name,
             updatedCount: counts.updatedCount,
@@ -434,7 +480,10 @@ export default function AreaDataTransferModal({
             areaCount: counts.areaCount,
             success: counts.progressSynced && hasImportedRecords,
             message: hasImportedRecords
-              ? `Đã cập nhật ${counts.updatedCount} hộ, thêm ${counts.newCount} hộ từ ${counts.areaCount} địa bàn.` +
+              ? `Đã cập nhật ${counts.updatedCount} hộ hoàn thành, thêm ${counts.newCount} hộ từ ${counts.areaCount} địa bàn.` +
+              (partialCount ? ` Nạp thêm ${partialCount} hộ đang nhập dở.` : '') +
+              (counts.incompleteHouseholds?.length ? ` Có ${counts.incompleteHouseholds.length} hộ chưa hoàn thành hoặc còn thiếu thông tin (xem danh sách bên dưới).` : '') +
+              (counts.problems?.length ? ` Có ${counts.problems.length} hộ/địa bàn không nạp được (xem bên dưới).` : '') +
               (replacedCount ? ` Đồng bộ ${replacedCount} thay đổi hộ thay thế (hộ dự phòng vào mẫu / hộ mẫu cũ đã thay).` : '') +
               (counts.skippedCount ? ` Bỏ qua ${counts.skippedCount} phiếu chưa hoàn thành hoặc thiếu nội dung.` : '') +
               (counts.progressSynced ? '' : ' Dữ liệu đã lưu cục bộ nhưng chưa đồng bộ số đếm tiến độ lên Firebase.')
@@ -453,6 +502,8 @@ export default function AreaDataTransferModal({
         }
       }
       setImportResults(results);
+      setIncompleteList(allIncomplete);
+      setProblemList(allProblems);
       const failed = results.filter(result => !result.success);
       showNotification(
         failed.length > 0 ? 'error' : 'success',
@@ -718,6 +769,50 @@ export default function AreaDataTransferModal({
                       )}
                     </div>
                   ))}
+                </div>
+              )}
+
+              {/* Danh sách hộ chưa hoàn thành / còn thiếu thông tin và lỗi theo địa bàn */}
+              {(incompleteList.length > 0 || problemList.length > 0) && (
+                <div className="bg-amber-50 rounded border border-amber-300 p-2.5 flex flex-col gap-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="font-bold text-amber-950 text-xs">
+                      {incompleteList.length > 0 && <>Hộ chưa hoàn thành hoặc còn thiếu thông tin: {incompleteList.length} hộ</>}
+                      {incompleteList.length > 0 && problemList.length > 0 && ' • '}
+                      {problemList.length > 0 && <span className="text-rose-800">Không nạp được: {problemList.length}</span>}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleDownloadIncompleteList}
+                      className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white font-bold text-[11px] cursor-pointer shrink-0"
+                    >
+                      Tải danh sách (CSV)
+                    </button>
+                  </div>
+                  <div className="max-h-64 overflow-y-auto flex flex-col gap-2">
+                    {incompleteByArea.map(([areaLabel, list]) => (
+                      <div key={areaLabel} className="bg-white border border-amber-200 rounded p-1.5">
+                        <div className="font-bold text-[11px] text-slate-800">{areaLabel} - {list.length} hộ</div>
+                        <ul className="mt-1 flex flex-col gap-0.5">
+                          {list.map((h, i) => (
+                            <li key={`${h.sttMau}-${i}`} className="text-[11px] text-slate-700 leading-snug">
+                              <b>STT {h.sttMau}</b> {h.householdHead || '(chưa có tên)'} — <span className="font-semibold text-amber-800">{h.status}</span>: {h.reasons.join('; ')}
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ))}
+                    {problemList.length > 0 && (
+                      <div className="bg-rose-50 border border-rose-200 rounded p-1.5">
+                        <div className="font-bold text-[11px] text-rose-900">Hộ/địa bàn không nạp được:</div>
+                        <ul className="mt-1 flex flex-col gap-0.5">
+                          {problemList.map((p, i) => (
+                            <li key={i} className="text-[11px] text-rose-900 leading-snug">{p}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
 
