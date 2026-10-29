@@ -109,6 +109,18 @@ export function isOfficialSurveyHousehold(household: Pick<Household, 'sampleStat
   return true;
 }
 
+/** Một hộ chính thức chưa hoàn thành hoặc còn thiếu thông tin khi Admin nạp file kết quả của ĐTV. */
+export interface IncompleteHouseholdInfo {
+  communeName: string;
+  areaCode: string;
+  sttMau: string;
+  householdHead: string;
+  surveyorName: string;
+  /** Chưa nhập | Đang nhập dở | Thiếu thông tin / số liệu chưa hợp lệ */
+  status: string;
+  reasons: string[];
+}
+
 /** Số hộ chính thức chuẩn của mỗi địa bàn. */
 export const OFFICIAL_HOUSEHOLDS_PER_AREA = 10;
 
