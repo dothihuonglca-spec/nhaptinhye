@@ -386,7 +386,8 @@ export default function AreaDataTransferModal({
   };
 
   // Gom danh sách hộ chưa hoàn thành theo địa bàn để hiển thị
-  const incompleteByArea = useMemo(() => {
+  // (tính trực tiếp, KHÔNG dùng hook vì nằm sau lệnh return sớm khi hộp thoại đóng)
+  const incompleteByArea: [string, IncompleteHouseholdInfo[]][] = (() => {
     const map = new Map<string, IncompleteHouseholdInfo[]>();
     incompleteList.forEach(h => {
       const key = `${h.communeName} - ĐB ${h.areaCode} (ĐTV: ${h.surveyorName})`;
@@ -395,7 +396,7 @@ export default function AreaDataTransferModal({
       map.set(key, list);
     });
     return Array.from(map.entries());
-  }, [incompleteList]);
+  })();
 
   // Thực hiện tổng hợp / nạp các file JSON
   const handleExecuteImport = async () => {
@@ -478,7 +479,8 @@ export default function AreaDataTransferModal({
             updatedCount: counts.updatedCount,
             newCount: counts.newCount,
             areaCount: counts.areaCount,
-            success: counts.progressSynced && hasImportedRecords,
+            // Nạp thành công khi dữ liệu đã vào máy Admin; chưa đồng bộ Firebase chỉ là cảnh báo trong nội dung
+            success: hasImportedRecords,
             message: hasImportedRecords
               ? `Đã cập nhật ${counts.updatedCount} hộ hoàn thành, thêm ${counts.newCount} hộ từ ${counts.areaCount} địa bàn.` +
               (partialCount ? ` Nạp thêm ${partialCount} hộ đang nhập dở.` : '') +
