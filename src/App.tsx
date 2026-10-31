@@ -4163,9 +4163,20 @@ export default function App() {
             : !h.assignedSurveyorName || h.assignedSurveyorName === item.surveyorName
         )
       ));
-      await Promise.all(snapshots.map(snapshot =>
+      // Firestore chỉ trả lời khi máy chủ xác nhận: mạng chậm/mất mạng thì chờ mãi => vòng quay không dừng.
+      // Giới hạn 8 giây: quá hạn thì coi như chưa đồng bộ (Firestore vẫn tự gửi bù khi có mạng), KHÔNG chặn việc nạp dữ liệu.
+      const syncPromise = Promise.all(snapshots.map(snapshot =>
         setDoc(doc(db, 'areaProgress', snapshot.id), snapshot)
       ));
+      syncPromise.catch(() => undefined);
+      const syncResult = await Promise.race([
+        syncPromise.then(() => 'ok' as const),
+        new Promise<'timeout'>(resolve => window.setTimeout(() => resolve('timeout'), 8000))
+      ]);
+      if (syncResult === 'timeout') {
+        console.warn('Đồng bộ tiến độ lên Firebase quá 8 giây, bỏ chờ (dữ liệu đã lưu trên máy).');
+        progressSynced = false;
+      }
     } catch (err) {
       console.error('Không thể đồng bộ số đếm tiến độ lên Firebase:', err);
       progressSynced = false;
@@ -4566,9 +4577,20 @@ export default function App() {
 
     let progressSynced = processedAreas.size > 0;
     try {
-      await Promise.all(snapshots.map(snapshot =>
+      // Firestore chỉ trả lời khi máy chủ xác nhận: mạng chậm/mất mạng thì chờ mãi => vòng quay không dừng.
+      // Giới hạn 8 giây: quá hạn thì coi như chưa đồng bộ (Firestore vẫn tự gửi bù khi có mạng), KHÔNG chặn việc nạp dữ liệu.
+      const syncPromise = Promise.all(snapshots.map(snapshot =>
         setDoc(doc(db, 'areaProgress', snapshot.id), snapshot)
       ));
+      syncPromise.catch(() => undefined);
+      const syncResult = await Promise.race([
+        syncPromise.then(() => 'ok' as const),
+        new Promise<'timeout'>(resolve => window.setTimeout(() => resolve('timeout'), 8000))
+      ]);
+      if (syncResult === 'timeout') {
+        console.warn('Đồng bộ tiến độ lên Firebase quá 8 giây, bỏ chờ (dữ liệu đã lưu trên máy).');
+        progressSynced = false;
+      }
     } catch (err) {
       console.error('Không thể đồng bộ số đếm tiến độ lên Firebase:', err);
       progressSynced = false;
