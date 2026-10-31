@@ -14,7 +14,7 @@ import {
   LogOut, LogIn, KeyRound, User, TrendingUp, ExternalLink, RotateCcw, ArrowRightLeft
 } from 'lucide-react';
 import { db } from './firebase';
-import { collection, doc, setDoc, onSnapshot } from 'firebase/firestore';
+import { collection, doc, setDoc, getDocs, query, where } from 'firebase/firestore';
 
 import { FullQuestionnaire, createDefaultQuestionnaire } from './types/questionnaire';
 import { calculateFullIncome } from './utils/incomeCalculator';
@@ -539,36 +539,116 @@ export default function App() {
   // và báo rõ trạng thái + mã lỗi để biết vì sao không tải được.
   const canReadCloudProgress = isLoggedIn && currentSurveyorId !== '' &&
     (surveyors.find(s => s.id === currentSurveyorId)?.role ?? 'ADMIN') !== 'SURVEYOR';
+  // TẢI TIẾN ĐỘ TỪ FIREBASE THEO CÁCH TIẾT KIỆM LƯỢT ĐỌC (thay cho onSnapshot nghe cả bộ sưu tập):
+  // - Lưu bản đã tải vào máy; mở app là hiện ngay, không tốn lượt đọc.
+  // - Chỉ hỏi Firebase các bản ghi có updatedAt mới hơn lần trước (tải gia tăng) => mỗi lần chỉ đọc vài bản ghi.
+  // - Tự làm mới 3 phút/lần khi đang mở tab, và đọc đầy đủ 1 lần mỗi 24 giờ để chắc chắn không sót.
   useEffect(() => {
     if (!canReadCloudProgress) return;
-    setCloudStatus(prev => ({ ...prev, state: 'loading', code: undefined, message: undefined }));
-    const unsubscribe = onSnapshot(collection(db, 'areaProgress'), { includeMetadataChanges: true }, snapshot => {
-      const all = snapshot.docs.map(document => document.data() as AreaProgressSnapshot);
-      const progress = all.filter(item =>
-        typeof item.id === 'string' &&
-        typeof item.areaId === 'string' &&
-        typeof item.totalHouseholds === 'number' &&
-        typeof item.completedHouseholds === 'number' &&
-        typeof item.inProgressHouseholds === 'number'
-      );
-      setCloudProgress(progress);
-      setCloudStatus({
-        state: 'ok',
-        fromCache: snapshot.metadata.fromCache,
-        lastSyncAt: new Date().toISOString(),
-        docCount: progress.length,
-        ignoredCount: all.length - progress.length
-      });
-    }, err => {
-      const code = (err as { code?: string })?.code || 'unknown';
-      console.error('Không thể đọc số đếm tiến độ từ Firebase:', err);
-      setCloudStatus({ state: 'error', code, message: err instanceof Error ? err.message : String(err) });
-      setNotification({
-        type: 'error',
-        message: `Không tải được tiến độ từ Firebase (${code}). Mở tab "3. Tiến độ ĐTV" để xem nguyên nhân chi tiết. Dữ liệu cục bộ vẫn được giữ nguyên.`
-      });
-    });
-    return () => unsubscribe();
+    const CACHE_KEY = 'cached_cloud_progress_v1';
+    const DAY_MS = 24 * 60 * 60 * 1000;
+    let cancelled = false;
+    let loadingNow = false;
+    let errorNotified = false;
+    let lastLoadAt = 0;
+    const byId = new Map<string, AreaProgressSnapshot>();
+    let lastUpdatedAt = '';
+    let fullAt = '';
+
+    try {
+      const raw = localStorage.getItem(CACHE_KEY);
+      if (raw) {
+        const cached = JSON.parse(raw) as { items?: AreaProgressSnapshot[]; lastUpdatedAt?: string; fullAt?: string; savedAt?: string };
+        (cached.items || []).forEach(item => { if (item && typeof item.id === 'string') byId.set(item.id, item); });
+        lastUpdatedAt = cached.lastUpdatedAt || '';
+        fullAt = cached.fullAt || '';
+      }
+    } catch (e) { /* bỏ qua cache hỏng */ }
+
+    const isValid = (item: any): item is AreaProgressSnapshot =>
+      typeof item?.id === 'string' &&
+      typeof item.areaId === 'string' &&
+      typeof item.totalHouseholds === 'number' &&
+      typeof item.completedHouseholds === 'number' &&
+      typeof item.inProgressHouseholds === 'number';
+
+    if (byId.size > 0) {
+      setCloudProgress(Array.from(byId.values()));
+      setCloudStatus({ state: 'ok', fromCache: true, lastSyncAt: fullAt || undefined, docCount: byId.size, ignoredCount: 0 });
+    } else {
+      setCloudStatus(prev => ({ ...prev, state: 'loading', code: undefined, message: undefined }));
+    }
+
+    const load = async () => {
+      if (cancelled || loadingNow) return;
+      loadingNow = true;
+      lastLoadAt = Date.now();
+      try {
+        const needFull = byId.size === 0 || !lastUpdatedAt || !fullAt || Date.now() - Date.parse(fullAt) > DAY_MS;
+        let snapshot;
+        if (needFull) {
+          snapshot = await getDocs(collection(db, 'areaProgress'));
+        } else {
+          // Lùi 15 phút để không sót bản ghi do đồng hồ máy ĐTV lệch
+          const since = new Date(Date.parse(lastUpdatedAt) - 15 * 60 * 1000).toISOString();
+          snapshot = await getDocs(query(collection(db, 'areaProgress'), where('updatedAt', '>', since)));
+        }
+        if (cancelled) return;
+        if (needFull) byId.clear();
+        let ignored = 0;
+        snapshot.docs.forEach(document => {
+          const item = document.data();
+          if (isValid(item)) byId.set(item.id, item);
+          else ignored++;
+        });
+        const all = Array.from(byId.values());
+        const maxUpdated = all.reduce((m, item) => (typeof item.updatedAt === 'string' && item.updatedAt > m ? item.updatedAt : m), lastUpdatedAt);
+        lastUpdatedAt = maxUpdated;
+        if (needFull) fullAt = new Date().toISOString();
+        try {
+          localStorage.setItem(CACHE_KEY, JSON.stringify({ items: all, lastUpdatedAt, fullAt, savedAt: new Date().toISOString() }));
+        } catch (e) { /* đầy bộ nhớ: bỏ qua */ }
+        setCloudProgress(all);
+        setCloudStatus({
+          state: 'ok',
+          fromCache: false,
+          lastSyncAt: new Date().toISOString(),
+          docCount: all.length,
+          ignoredCount: ignored
+        });
+        errorNotified = false;
+      } catch (err) {
+        if (cancelled) return;
+        const code = (err as { code?: string })?.code || 'unknown';
+        console.error('Không thể đọc số đếm tiến độ từ Firebase:', err);
+        // Vẫn giữ số liệu đã lưu trên máy; chỉ báo lỗi 1 lần để khỏi làm phiền
+        setCloudStatus(prev => ({ ...prev, state: 'error', code, message: err instanceof Error ? err.message : String(err) }));
+        if (!errorNotified) {
+          errorNotified = true;
+          setNotification({
+            type: 'error',
+            message: code === 'resource-exhausted'
+              ? 'Firebase đã hết hạn mức đọc/ghi trong ngày nên chưa cập nhật được tiến độ mới. Đang hiển thị số liệu đã lưu trên máy; hạn mức được tính lại vào khoảng 14-15h chiều (giờ Việt Nam).'
+              : `Không tải được tiến độ từ Firebase (${code}). Đang hiển thị số liệu đã lưu trên máy. Mở tab "3. Tiến độ ĐTV" để xem nguyên nhân chi tiết.`
+          });
+          setTimeout(() => setNotification(null), 15000);
+        }
+      } finally {
+        loadingNow = false;
+      }
+    };
+
+    load();
+    const timer = window.setInterval(() => { if (!document.hidden) load(); }, 3 * 60 * 1000);
+    const onVisible = () => {
+      if (!document.hidden && Date.now() - lastLoadAt > 60 * 1000) load();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+    };
   }, [canReadCloudProgress, cloudReloadKey]);
 
   // Đăng nhập trên máy/trình duyệt khác: bảng kê lưu theo từng máy nên cần báo để cập nhật vào máy này
@@ -2768,8 +2848,17 @@ export default function App() {
 
   // Admin/Giám sát đổi trạng thái hộ (xóa trắng, duyệt, hàng loạt, thay thế hộ, lưu phiếu) → ghi lại số đếm
   // của các địa bàn bị ảnh hưởng. ĐTV không dùng hàm này vì đã có cơ chế tự đồng bộ ở trên.
-  const syncAreaProgressForHouseholds = (nextHouseholds: Household[], changedHouseholds: Household[]) => {
-    if (currentUser.role === 'SURVEYOR' || changedHouseholds.length === 0) return;
+  type ProgressSyncResult = { attempted: number; failed: boolean; reason?: string };
+  const syncAreaProgressForHouseholds = (
+    nextHouseholds: Household[],
+    changedHouseholds: Household[],
+    onResult?: (result: ProgressSyncResult) => void,
+    opts?: { onlyWithProgress?: boolean }
+  ) => {
+    if (currentUser.role === 'SURVEYOR' || changedHouseholds.length === 0) {
+      onResult?.({ attempted: 0, failed: false });
+      return;
+    }
     try {
       const communesById = new Map(communes.map(commune => [commune.id, commune]));
       const communesByCode = new Map(communes.map(commune => [commune.communeCode, commune]));
@@ -2782,7 +2871,10 @@ export default function App() {
         const key = keyOf(household);
         if (key) affectedKeys.add(key);
       });
-      if (affectedKeys.size === 0) return;
+      if (affectedKeys.size === 0) {
+        onResult?.({ attempted: 0, failed: false });
+        return;
+      }
 
       const householdsByAreaKey = new Map<string, Household[]>();
       nextHouseholds.forEach(household => {
@@ -2827,6 +2919,8 @@ export default function App() {
           )
         );
         if (snapshot.totalHouseholds === 0) return;
+        // Gửi lại hàng loạt: chỉ gửi địa bàn đã có hộ hoàn thành/đang nhập (địa bàn 0% không cần bản ghi, tiết kiệm lượt ghi)
+        if (opts?.onlyWithProgress && snapshot.completedHouseholds + snapshot.inProgressHouseholds === 0) return;
         // Số đếm không đổi so với bản ghi đã biết (ví dụ chỉ Duyệt & Khóa: vẫn là "hoàn thành") → không ghi,
         // để mốc "hoàn thành lúc" trên Firebase không bị làm mới oan.
         const knownSnapshot = cloudProgress.find(item => item.id === snapshot.id);
@@ -2835,20 +2929,68 @@ export default function App() {
         snapshots.push(snapshot);
       });
 
+      if (snapshots.length === 0) {
+        onResult?.({ attempted: 0, failed: false });
+        return;
+      }
+      let finished = false;
+      const fail = (err: unknown) => {
+        if (finished) return;
+        finished = true;
+        console.error('Không thể đồng bộ số đếm tiến độ lên Firebase:', err);
+        if (onResult) {
+          onResult({ attempted: snapshots.length, failed: true, reason: err instanceof Error ? err.message : String(err) });
+        } else {
+          setNotification({
+            type: 'error',
+            message: 'Đã đổi trạng thái hộ trên máy này nhưng chưa ghi được tiến độ lên Firebase. Màn Tiến độ trên máy khác có thể chưa cập nhật.'
+          });
+        }
+      };
+      // Firestore không trả lời khi hết hạn mức hoặc mất mạng: giới hạn 10 giây để không treo giao diện
+      const syncTimer = window.setTimeout(
+        () => fail(new Error('Quá 10 giây không được Firebase xác nhận (có thể hết hạn mức trong ngày hoặc mất mạng)')),
+        10000
+      );
       Promise.all(snapshots.map(snapshot =>
         setDoc(doc(db, 'areaProgress', snapshot.id), snapshot).then(() => {
           progressSyncCacheRef.current.set(snapshot.id, progressSyncSignature(snapshot));
         })
-      )).catch(err => {
-        console.error('Không thể đồng bộ số đếm tiến độ lên Firebase:', err);
-        setNotification({
-          type: 'error',
-          message: 'Đã đổi trạng thái hộ trên máy này nhưng chưa ghi được tiến độ lên Firebase. Màn Tiến độ trên máy khác có thể chưa cập nhật.'
-        });
+      )).then(() => {
+        if (finished) return;
+        finished = true;
+        window.clearTimeout(syncTimer);
+        setCloudReloadKey(k => k + 1);
+        onResult?.({ attempted: snapshots.length, failed: false });
+      }).catch(err => {
+        window.clearTimeout(syncTimer);
+        fail(err);
       });
+
     } catch (err) {
       console.error('Lỗi chuẩn bị đồng bộ tiến độ:', err);
+      onResult?.({ attempted: 0, failed: true, reason: err instanceof Error ? err.message : String(err) });
     }
+  };
+
+  // Nút "Gửi lại tiến độ lên Firebase" (Admin/Giám sát): gửi lại số đếm các địa bàn đã có phiếu nhưng chưa lên được Firebase
+  const [resyncingProgress, setResyncingProgress] = useState<boolean>(false);
+  const handleResyncAllProgress = () => {
+    if (resyncingProgress || currentUser.role === 'SURVEYOR') return;
+    setResyncingProgress(true);
+    syncAreaProgressForHouseholds(households, households, result => {
+      setResyncingProgress(false);
+      if (result.failed) {
+        showNotification(
+          'error',
+          'Chưa gửi được tiến độ lên Firebase. Nếu Firebase báo hết hạn mức trong ngày thì hãy thử lại sau khoảng 14-15h chiều (giờ Việt Nam). Dữ liệu trên máy vẫn còn nguyên.'
+        );
+      } else if (result.attempted === 0) {
+        showNotification('success', 'Tiến độ trên Firebase đã khớp với dữ liệu trên máy này, không cần gửi lại.');
+      } else {
+        showNotification('success', `Đã gửi lại tiến độ của ${result.attempted} địa bàn lên Firebase.`);
+      }
+    }, { onlyWithProgress: true });
   };
 
   useEffect(() => {
@@ -4176,6 +4318,8 @@ export default function App() {
       if (syncResult === 'timeout') {
         console.warn('Đồng bộ tiến độ lên Firebase quá 8 giây, bỏ chờ (dữ liệu đã lưu trên máy).');
         progressSynced = false;
+      } else {
+        setCloudReloadKey(k => k + 1);
       }
     } catch (err) {
       console.error('Không thể đồng bộ số đếm tiến độ lên Firebase:', err);
@@ -4590,6 +4734,8 @@ export default function App() {
       if (syncResult === 'timeout') {
         console.warn('Đồng bộ tiến độ lên Firebase quá 8 giây, bỏ chờ (dữ liệu đã lưu trên máy).');
         progressSynced = false;
+      } else {
+        setCloudReloadKey(k => k + 1);
       }
     } catch (err) {
       console.error('Không thể đồng bộ số đếm tiến độ lên Firebase:', err);
@@ -7480,6 +7626,8 @@ export default function App() {
             cloudProgress={cloudProgress}
             cloudStatus={cloudStatus}
             onReloadCloud={() => setCloudReloadKey(k => k + 1)}
+            onResyncProgress={handleResyncAllProgress}
+            resyncingProgress={resyncingProgress}
             onOpenImportTab={() => setActiveTab('import')}
             onOpenHouseholdForm={(hh) => {
               setActiveHouseholdForm(hh);
