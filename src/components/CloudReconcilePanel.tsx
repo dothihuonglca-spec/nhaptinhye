@@ -29,6 +29,8 @@ interface Props {
   cloudProgress: AreaProgressSnapshot[];
   cloudStatus: CloudStatus;
   onReloadCloud: () => void;
+  onResyncProgress?: () => void;
+  resyncingProgress?: boolean;
   communes: Commune[];
   areas: SurveyArea[];
   households: Household[];
@@ -81,7 +83,7 @@ function formatTime(iso?: string): string {
 }
 
 export const CloudReconcilePanel: React.FC<Props> = ({
-  cloudProgress, cloudStatus, onReloadCloud, communes, areas, households, surveyors,
+  cloudProgress, cloudStatus, onReloadCloud, onResyncProgress, resyncingProgress, communes, areas, households, surveyors,
   onOpenJsonImport, onOpenImportTab, showNotification
 }) => {
   const [filter, setFilter] = useState<'PROBLEM' | 'ALL' | CloudReconcileStatus>('PROBLEM');
@@ -184,6 +186,18 @@ export const CloudReconcilePanel: React.FC<Props> = ({
             <RefreshCw className={`w-3.5 h-3.5 ${cloudStatus.state === 'loading' ? 'animate-spin' : ''}`} />
             <span>Tải lại từ Firebase</span>
           </button>
+          {onResyncProgress && (
+            <button
+              type="button"
+              onClick={onResyncProgress}
+              disabled={resyncingProgress}
+              title="Gửi lại số đếm tiến độ các địa bàn đã có phiếu từ máy này lên Firebase (dùng sau khi nạp file ĐTV mà chưa đồng bộ được)"
+              className="h-8 px-3 bg-amber-600 hover:bg-amber-500 disabled:opacity-60 text-white rounded font-bold flex items-center gap-1.5 cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${resyncingProgress ? 'animate-spin' : ''}`} />
+              <span>{resyncingProgress ? 'Đang gửi...' : 'Gửi lại tiến độ lên Firebase'}</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setExpanded(v => !v)}

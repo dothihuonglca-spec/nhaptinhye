@@ -29,6 +29,8 @@ interface SurveyorProgressViewProps {
   cloudProgress: AreaProgressSnapshot[];
   cloudStatus: CloudStatus;
   onReloadCloud: () => void;
+  onResyncProgress?: () => void;
+  resyncingProgress?: boolean;
   onOpenImportTab?: () => void;
   onOpenHouseholdForm?: (household: Household) => void;
   onNavigateToHouseholdEntry?: (surveyorNameOrId: string, areaId?: string, communeId?: string) => void;
@@ -87,6 +89,8 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
   cloudProgress,
   cloudStatus,
   onReloadCloud,
+  onResyncProgress,
+  resyncingProgress,
   onOpenImportTab,
   onOpenHouseholdForm,
   onNavigateToHouseholdEntry,
@@ -990,6 +994,8 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
           cloudProgress={cloudProgress}
           cloudStatus={cloudStatus}
           onReloadCloud={onReloadCloud}
+          onResyncProgress={onResyncProgress}
+          resyncingProgress={resyncingProgress}
           communes={communes as any}
           areas={areas as any}
           households={households as any}
