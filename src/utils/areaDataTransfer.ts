@@ -56,6 +56,10 @@ export interface SurveyWorkPackage {
   type: 'SURVEY_WORK_PACKAGE';
   version: '1.0';
   purpose: 'ASSIGNMENT' | 'RESULTS';
+  /** 'ALL_SURVEYORS': file gộp kết quả của NHIỀU ĐTV do Admin/Quản lý/Giám sát xuất (chỉ dùng với purpose RESULTS) */
+  scope?: 'ALL_SURVEYORS';
+  /** 'ONLY_NEW': khi nạp, hộ đã có phiếu trên máy Admin thì bỏ qua, chỉ lấy hộ mới */
+  importMode?: 'ONLY_NEW';
   exportedAt: string;
   exportedBy: {
     id: string;
@@ -240,6 +244,29 @@ export function createSurveyWorkPackage(
   };
 }
 
+/** Gói kết quả gộp của tất cả ĐTV (1 file): chỉ gồm hộ đã nhập phiếu; khi nạp chỉ lấy hộ mới, hộ trùng thì bỏ qua. */
+export function createAllSurveyorsResultPackage(
+  currentUser: Surveyor,
+  entries: SurveyWorkPackageEntry[]
+): SurveyWorkPackage {
+  return {
+    ...createSurveyWorkPackage('RESULTS', currentUser, entries),
+    scope: 'ALL_SURVEYORS',
+    importMode: 'ONLY_NEW'
+  };
+}
+
+/** Gói kết quả của CHÍNH ĐTV: xuất hết phiếu đã nhập (mọi địa bàn) ra 1 file; Admin đọc chỉ lấy hộ mới, hộ trùng bỏ qua. */
+export function createSurveyorAllResultsPackage(
+  currentUser: Surveyor,
+  entries: SurveyWorkPackageEntry[]
+): SurveyWorkPackage {
+  return {
+    ...createSurveyWorkPackage('RESULTS', currentUser, entries),
+    importMode: 'ONLY_NEW'
+  };
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -348,7 +375,8 @@ export function parseSurveyWorkPackage(text: string): SurveyWorkPackage {
     !exportedBy.name ||
     !['ADMIN', 'MANAGER', 'SUPERVISOR', 'SURVEYOR'].includes(exportedBy.role) ||
     (workPackage.purpose === 'ASSIGNMENT' && exportedBy.role === 'SURVEYOR') ||
-    (workPackage.purpose === 'RESULTS' && exportedBy.role !== 'SURVEYOR')
+    (workPackage.purpose === 'RESULTS' && workPackage.scope !== 'ALL_SURVEYORS' && exportedBy.role !== 'SURVEYOR') ||
+    (workPackage.scope === 'ALL_SURVEYORS' && (workPackage.purpose !== 'RESULTS' || exportedBy.role === 'SURVEYOR'))
   ) {
     throw new Error('Gói JSON thiếu thông tin hoặc sai vai trò người xuất.');
   }
@@ -365,7 +393,7 @@ export function parseSurveyWorkPackage(text: string): SurveyWorkPackage {
     ) {
       throw new Error('Gói JSON có địa bàn thiếu mã phân công hoặc danh sách hộ.');
     }
-    if (workPackage.purpose === 'RESULTS' && entry.surveyorId !== exportedBy.id) {
+    if (workPackage.purpose === 'RESULTS' && workPackage.scope !== 'ALL_SURVEYORS' && entry.surveyorId !== exportedBy.id) {
       throw new Error('Gói kết quả có mã ĐTV không khớp với người xuất file.');
     }
   });
