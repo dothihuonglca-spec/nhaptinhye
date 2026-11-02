@@ -34,6 +34,7 @@ import { IndustrialSurveyPage } from './modules/industrialSurvey';
 import bannerImg from './assets/images/background-ngoai-troi-dep_042633251.jpg';
 import { OFFICIAL_COMMUNES_CATALOG, COMMUNE_POPULATION_MAP } from './data/communesCatalog';
 import { extrapolateScope, extrapolateCommune, isHouseholdCountedForAverage, validateHouseholdIncome, type CommuneInput } from './utils/incomeExtrapolation';
+import { exportCompletedQuestionnairesToExcel } from './utils/questionnaireExcelExport';
 import { 
   Surveyor, UserRole, SurveyStatus, Department, ROLE_LABELS, SURVEY_STATUS_LABELS 
 } from './types/user';
@@ -66,7 +67,10 @@ import {
   sameHouseholdName,
   findHouseholdBySourceKey,
   markOriginalAsReplaced,
-  type IncompleteHouseholdInfo
+  type IncompleteHouseholdInfo,
+  createAllSurveyorsResultPackage,
+  createSurveyorAllResultsPackage,
+  type SurveyWorkPackageEntry
 } from './utils/areaDataTransfer';
 import {
   loadPreRestoreSnapshot,
@@ -3961,6 +3965,8 @@ export default function App() {
     let markedReplacedCount = 0;
     let updatedStructureCount = 0;
     let partialImportedCount = 0;
+    // Chế độ chỉ lấy hộ mới (file gộp của tất cả ĐTV): đếm số hộ trùng đã bỏ qua
+    let duplicateSkippedCount = 0;
     // Danh sách hộ chính thức chưa hoàn thành hoặc còn thiếu thông tin để báo cho Admin
     const incompleteHouseholds: IncompleteHouseholdInfo[] = [];
     // Các lỗi theo từng địa bàn/hộ: một hộ lỗi không được làm mất cả địa bàn hay cả file
@@ -4180,6 +4186,15 @@ export default function App() {
           continue;
         }
         const existing = nextHouseholds[householdIndex];
+        // Chế độ ONLY_NEW: hộ đã có phiếu trên máy Admin thì bỏ qua, không ghi đè
+        if (
+          workPackage.importMode === 'ONLY_NEW' &&
+          existing.questionnaire &&
+          hasCompletedSurveyContent(existing.questionnaire)
+        ) {
+          duplicateSkippedCount++;
+          continue;
+        }
         if (
           existing.areaId !== localArea.id &&
           !(existing.areaCode === localArea.code && (
@@ -4335,6 +4350,7 @@ export default function App() {
       progressSynced,
       skippedCount: skippedIncompleteCount,
       partialCount: partialImportedCount,
+      duplicateCount: duplicateSkippedCount,
       incompleteHouseholds,
       problems: importProblems
     };
@@ -5752,6 +5768,155 @@ export default function App() {
     showNotification('success', 'Đã xuất file Excel danh sách Bảng kê Hộ mẫu.');
   };
 
+  // XUẤT EXCEL CHI TIẾT PHIẾU ĐÃ HOÀN THÀNH (Admin/Quản lý/Giám sát):
+  // thành viên trong hộ + chi tiết thu - chi từng mục. Chỉ xuất hộ đã hoàn thành/đã duyệt, bỏ hộ đã thay thế.
+  const handleExportCompletedDetailExcel = () => {
+    if (currentUser.role === 'SURVEYOR') {
+      showNotification('error', 'Chức năng này dành cho Admin, Quản lý và Giám sát.');
+      return;
+    }
+    const completed = households
+      .filter(h =>
+        // Chỉ hộ CHÍNH THỨC: hộ dự phòng chưa dùng và hộ đã thay thế không thuộc mẫu điều tra
+        isOfficialSampleStatus(h.sampleStatus) &&
+        isCompletedSurveyStatus(h.surveyStatus) &&
+        Boolean(h.questionnaire) &&
+        hasCompletedSurveyContent(h.questionnaire)
+      )
+      .sort((a, b) =>
+        String(a.communeCode || '').localeCompare(String(b.communeCode || ''), 'vi') ||
+        String(a.areaCode || '').localeCompare(String(b.areaCode || ''), 'vi') ||
+        (Number(a.sttMau) || 0) - (Number(b.sttMau) || 0)
+      );
+    if (completed.length === 0) {
+      showNotification('error', 'Chưa có hộ nào đã hoàn thành phiếu để xuất Excel.');
+      return;
+    }
+    try {
+      const communeNames = Array.from(new Set(completed.map(h => h.communeName || h.communeCode).filter(Boolean)));
+      const fileLabel = communeNames.length === 1 ? String(communeNames[0]) : 'ToanBo';
+      const tables = exportCompletedQuestionnairesToExcel(
+        completed,
+        {
+          resolveLocation: (h: Household) => {
+            const commune = communes.find(c => c.id === h.communeId || (Boolean(h.communeCode) && c.communeCode === h.communeCode));
+            const area = areas.find(a => a.id === h.areaId);
+            return {
+              tkcsCode: h.tkcsCode || commune?.tkcsCode || '',
+              tkcsName: h.tkcsName || commune?.tkcsName || '',
+              communeCode: h.communeCode || commune?.communeCode || '',
+              communeName: h.communeName || commune?.communeName || '',
+              areaCode: h.areaCode || area?.code || '',
+              areaName: h.areaName || area?.name || ''
+            };
+          },
+          statusLabel: (status?: string) => (status && (SURVEY_STATUS_LABELS as Record<string, string>)[status]) || status || ''
+        },
+        fileLabel
+      );
+      // Cảnh báo địa bàn có hơn 10 hộ chính thức hoàn thành (thường do hộ nhập trùng hoặc thay thế chưa đúng)
+      const perArea = new Map<string, number>();
+      completed.forEach(h => {
+        const key = `${h.communeName || h.communeCode} - ĐB ${h.areaCode}`;
+        perArea.set(key, (perArea.get(key) || 0) + 1);
+      });
+      const overLimit = Array.from(perArea.entries()).filter(([, count]) => count > 10);
+      showNotification(
+        overLimit.length > 0 ? 'error' : 'success',
+        `Đã xuất Excel ${tables.householdCount} hộ hoàn thành: ${tables.memberRowCount} thành viên, ${tables.detailRowCount} dòng thu chi.` +
+        (overLimit.length > 0
+          ? ` CẢNH BÁO: ${overLimit.length} địa bàn có hơn 10 hộ chính thức: ${overLimit.slice(0, 5).map(([k, c]) => `${k} (${c} hộ)`).join('; ')}${overLimit.length > 5 ? '...' : ''}. Cần kiểm tra hộ trùng hoặc thay thế chưa đúng.`
+          : '')
+      );
+    } catch (err) {
+      console.error('Lỗi xuất Excel chi tiết phiếu:', err);
+      showNotification('error', 'Không xuất được file Excel chi tiết phiếu. Vui lòng thử lại.');
+    }
+  };
+
+  // XUẤT 1 FILE JSON GỘP KẾT QUẢ CỦA TẤT CẢ ĐTV (Admin/Quản lý/Giám sát):
+  // ĐTV nào đã nhập phiếu hộ nào thì xuất hết ra 1 file; khi Admin đọc file này, hộ trùng bị bỏ qua, chỉ lấy hộ mới.
+  // Điều tra viên cũng dùng nút này: xuất hết phiếu mình đã nhập (mọi địa bàn được giao) ra 1 file gửi Admin.
+  const handleExportAllSurveyorsResults = () => {
+    const isSurveyorUser = currentUser.role === 'SURVEYOR';
+    const hasContent = (h: Household) => Boolean(h.questionnaire) && hasCompletedSurveyContent(h.questionnaire);
+    const groups = new Map<string, SurveyWorkPackageEntry & { hasData: boolean }>();
+    let skippedNoOwner = 0;
+    let skippedNoArea = 0;
+    households.forEach(h => {
+      const content = hasContent(h);
+      const structural = isReplacedSampleStatus(h.sampleStatus) || isReplacementHousehold(h);
+      if (!content && !structural) return;
+      // ĐTV: toàn bộ hộ trên máy là của chính mình. Admin/Quản lý/Giám sát: lấy theo ĐTV được gán cho hộ.
+      const ownerId = isSurveyorUser ? currentUser.id : h.assignedSurveyorId;
+      if (!ownerId) {
+        if (content) skippedNoOwner++;
+        return;
+      }
+      const area = areas.find(a => a.id === h.areaId) ||
+        areas.find(a => a.code === h.areaCode && (a.communeId === h.communeId || a.communeCode === h.communeCode));
+      const commune = communes.find(c => c.id === h.communeId || (Boolean(h.communeCode) && c.communeCode === h.communeCode));
+      if (!area || !commune) {
+        if (content) skippedNoArea++;
+        return;
+      }
+      const surveyor = surveyors.find(s => s.id === ownerId);
+      const key = `${ownerId}::${area.id}`;
+      const group = groups.get(key) || {
+        surveyorId: ownerId,
+        surveyorName: isSurveyorUser ? currentUser.name : (surveyor?.name || h.assignedSurveyorName || ownerId),
+        area,
+        commune,
+        households: [] as Household[],
+        hasData: false
+      };
+      group.households.push(h);
+      if (content) group.hasData = true;
+      groups.set(key, group);
+    });
+    // Chỉ giữ địa bàn thật sự có phiếu (hộ thay thế đi kèm được giữ trong địa bàn đó)
+    const entries: SurveyWorkPackageEntry[] = Array.from(groups.values())
+      .filter(g => g.hasData)
+      .map(({ hasData, ...entry }) => entry)
+      .sort((a, b) =>
+        String(a.commune.communeCode).localeCompare(String(b.commune.communeCode), 'vi', { numeric: true }) ||
+        String(a.area.code).localeCompare(String(b.area.code), 'vi', { numeric: true })
+      );
+    if (entries.length === 0) {
+      showNotification('error', 'Chưa có phiếu nào đã nhập trên máy này để xuất.');
+      return;
+    }
+    try {
+      const pkg = isSurveyorUser
+        ? createSurveyorAllResultsPackage(currentUser, entries)
+        : createAllSurveyorsResultPackage(currentUser, entries);
+      const blob = new Blob([JSON.stringify(pkg)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = isSurveyorUser
+        ? `Ket_Qua_DTV_TatCa_${new Date().toISOString().slice(0, 10)}.json`
+        : `Ket_Qua_Tat_Ca_DTV_${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      const surveyorCount = new Set(entries.map(e => e.surveyorId)).size;
+      const phieuCount = entries.reduce((sum, e) => sum + e.households.filter(hasContent).length, 0);
+      showNotification(
+        'success',
+        (isSurveyorUser
+          ? `Đã xuất 1 file gồm ${phieuCount} hộ đã nhập phiếu của ${entries.length} địa bàn. Gửi file này cho Admin.`
+          : `Đã xuất 1 file gồm ${phieuCount} hộ đã nhập phiếu của ${surveyorCount} ĐTV, ${entries.length} địa bàn.`) +
+        (skippedNoOwner ? ` Bỏ qua ${skippedNoOwner} hộ chưa gán ĐTV.` : '') +
+        (skippedNoArea ? ` Bỏ qua ${skippedNoArea} hộ không tìm thấy địa bàn/xã.` : '')
+      );
+    } catch (err) {
+      console.error('Lỗi xuất file JSON gộp tất cả ĐTV:', err);
+      showNotification('error', 'Không xuất được file JSON gộp. File có thể quá lớn, hãy thử lại hoặc xuất theo từng xã.');
+    }
+  };
+
   const handleExportEnteredQuestionnairesExcel = () => {
     const wb = XLSX.utils.book_new();
 
@@ -5766,8 +5931,11 @@ export default function App() {
       ]
     ];
 
-    const exportList = filteredHouseholds.filter(h => h.surveyStatus === 'DA_HOAN_THANH' || h.surveyStatus === 'DA_DUYET' || h.surveyStatus === 'DANG_NHAP' || Boolean(h.questionnaire));
-    const listToExport = exportList.length > 0 ? exportList : filteredHouseholds;
+    // Chỉ xuất hộ CHÍNH THỨC của mẫu điều tra: hộ "ĐÃ THAY THẾ" (hộ mẫu cũ đã được thay) và hộ dự phòng chưa dùng
+    // không được tính, nếu không địa bàn sẽ bị thừa hộ (VD 10 hộ chính thức + 3 hộ đã thay thế = 13 hộ).
+    const officialFilteredHouseholds = filteredHouseholds.filter(h => isOfficialSampleStatus(h.sampleStatus));
+    const exportList = officialFilteredHouseholds.filter(h => h.surveyStatus === 'DA_HOAN_THANH' || h.surveyStatus === 'DA_DUYET' || h.surveyStatus === 'DANG_NHAP' || Boolean(h.questionnaire));
+    const listToExport = exportList.length > 0 ? exportList : officialFilteredHouseholds;
 
     listToExport.forEach(h => {
       const inc = calculateHouseholdTotalIncome(h);
@@ -7672,6 +7840,8 @@ export default function App() {
             onExportSurveyorBackup={handleExportSurveyorBackup}
             onRestoreSurveyorEntryBackup={handleRestoreSurveyorEntryBackup}
             onExportEnteredExcel={handleExportEnteredQuestionnairesExcel}
+            onExportCompletedDetailExcel={handleExportCompletedDetailExcel}
+            onExportAllSurveyorsResults={handleExportAllSurveyorsResults}
             onGoToProgress={() => setActiveTab('surveyor_progress')}
           />
         )}
