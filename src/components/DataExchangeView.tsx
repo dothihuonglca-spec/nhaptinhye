@@ -26,6 +26,8 @@ interface Props {
   onExportSurveyorBackup: () => void;
   onRestoreSurveyorEntryBackup: (event: React.ChangeEvent<HTMLInputElement>) => void;
   onExportEnteredExcel: () => void;
+  onExportCompletedDetailExcel?: () => void;
+  onExportAllSurveyorsResults?: () => void;
   onGoToProgress?: () => void;
 }
 
@@ -80,7 +82,7 @@ const FileButton: React.FC<{
 export const DataExchangeView: React.FC<Props> = ({
   currentUser, householdCount, areaCount, communeCount, onOpenTransfer,
   onExportLocalBackup, onExportPreRestoreBackup, onRestoreLocalBackup,
-  onExportSurveyorBackup, onRestoreSurveyorEntryBackup, onExportEnteredExcel, onGoToProgress
+  onExportSurveyorBackup, onRestoreSurveyorEntryBackup, onExportEnteredExcel, onExportCompletedDetailExcel, onExportAllSurveyorsResults, onGoToProgress
 }) => {
   const isAdmin = currentUser.role === 'ADMIN';
   const isSurveyor = currentUser.role === 'SURVEYOR';
@@ -136,6 +138,15 @@ export const DataExchangeView: React.FC<Props> = ({
                 label="Đọc file JSON nhiều định dạng khác nhau"
                 sub="backup.json, sao lưu phiếu của ĐTV, danh sách hộ/phiếu rời: tự nhận dạng"
               />
+              {onExportAllSurveyorsResults && (
+                <ActionButton
+                  onClick={onExportAllSurveyorsResults}
+                  color="bg-indigo-800 hover:bg-indigo-700 border-indigo-700"
+                  icon={<Download className="w-4 h-4 text-indigo-200" />}
+                  label="Xuất 1 file JSON phiếu của TẤT CẢ ĐTV"
+                  sub="Mọi phiếu đã nhập trên máy này; Admin đọc bằng nút 'Đọc trực tiếp JSON do ĐTV xuất ra', hộ trùng bỏ qua, chỉ lấy hộ mới"
+                />
+              )}
             </>
           ) : (
             <>
@@ -153,6 +164,15 @@ export const DataExchangeView: React.FC<Props> = ({
                 label="Xuất Data Mới Làm Gửi Admin (.json)"
                 sub="Địa bàn đã hoàn thành hoặc mới sửa"
               />
+              {onExportAllSurveyorsResults && (
+                <ActionButton
+                  onClick={onExportAllSurveyorsResults}
+                  color="bg-indigo-700 hover:bg-indigo-600 border-indigo-600"
+                  icon={<Download className="w-4 h-4 text-indigo-200" />}
+                  label="Xuất TẤT CẢ phiếu đã nhập (1 file .json)"
+                  sub="Mọi phiếu đã nhập của các địa bàn được giao; Admin đọc sẽ bỏ qua hộ trùng, chỉ lấy hộ mới"
+                />
+              )}
             </>
           )}
         </Card>
@@ -236,6 +256,15 @@ export const DataExchangeView: React.FC<Props> = ({
             icon={<FileSpreadsheet className="w-4 h-4" />}
             label="Xuất Excel Phiếu Đã Nhập"
           />
+          {canManage && onExportCompletedDetailExcel && (
+            <ActionButton
+              onClick={onExportCompletedDetailExcel}
+              color="bg-emerald-800 hover:bg-emerald-700 border-emerald-700"
+              icon={<FileSpreadsheet className="w-4 h-4" />}
+              label="Xuất Excel Chi Tiết Phiếu Đã Hoàn Thành"
+              sub="Thành viên trong hộ + thu, chi từng mục (3 trang)"
+            />
+          )}
         </Card>
 
         {/* FIREBASE */}
