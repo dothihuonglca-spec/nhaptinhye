@@ -113,6 +113,22 @@ export function isOfficialSurveyHousehold(household: Pick<Household, 'sampleStat
   return true;
 }
 
+/** Kết quả nạp của từng địa bàn trong 1 file (để Admin thấy rõ địa bàn nào được bao nhiêu hộ). */
+export interface AreaImportDetail {
+  communeName: string;
+  areaCode: string;
+  areaName: string;
+  surveyorName: string;
+  /** Số hộ đã hoàn thành phiếu có trong file ở địa bàn này */
+  inFile: number;
+  /** Số hộ NẠP MỚI vào máy Admin */
+  added: number;
+  /** Số hộ máy Admin đã có sẵn nên bỏ qua */
+  duplicate: number;
+  /** Số hộ đang nhập dở được nạp */
+  partial: number;
+}
+
 /** Một hộ chính thức chưa hoàn thành hoặc còn thiếu thông tin khi Admin nạp file kết quả của ĐTV. */
 export interface IncompleteHouseholdInfo {
   communeName: string;
