@@ -17,7 +17,8 @@ import {
   isAreaAssigned,
   normalizeSurveyorName,
   SurveyWorkPackage,
-  type IncompleteHouseholdInfo
+  type IncompleteHouseholdInfo,
+  type AreaImportDetail
 } from '../utils/areaDataTransfer';
 import { parseSurveyorEntryBackup } from '../utils/localDataBackup';
 
@@ -46,6 +47,8 @@ interface AreaDataTransferModalProps {
     progressSynced: boolean;
     skippedCount?: number;
     partialCount?: number;
+    duplicateCount?: number;
+    areaDetails?: AreaImportDetail[];
     incompleteHouseholds?: IncompleteHouseholdInfo[];
     problems?: string[];
   }>;
@@ -102,6 +105,7 @@ export default function AreaDataTransferModal({
     areaCount: number;
     success: boolean;
     message: string;
+    areaDetails?: AreaImportDetail[];
   }[]>([]);
   // Hộ chính thức chưa hoàn thành / còn thiếu thông tin và các lỗi theo địa bàn của lần nạp vừa rồi
   const [incompleteList, setIncompleteList] = useState<IncompleteHouseholdInfo[]>([]);
@@ -480,16 +484,34 @@ export default function AreaDataTransferModal({
             newCount: counts.newCount,
             areaCount: counts.areaCount,
             // Nạp thành công khi dữ liệu đã vào máy Admin; chưa đồng bộ Firebase chỉ là cảnh báo trong nội dung
-            success: hasImportedRecords,
-            message: hasImportedRecords
-              ? `Đã cập nhật ${counts.updatedCount} hộ hoàn thành, thêm ${counts.newCount} hộ từ ${counts.areaCount} địa bàn.` +
-              (partialCount ? ` Nạp thêm ${partialCount} hộ đang nhập dở.` : '') +
-              (counts.incompleteHouseholds?.length ? ` Có ${counts.incompleteHouseholds.length} hộ chưa hoàn thành hoặc còn thiếu thông tin (xem danh sách bên dưới).` : '') +
-              (counts.problems?.length ? ` Có ${counts.problems.length} hộ/địa bàn không nạp được (xem bên dưới).` : '') +
-              (replacedCount ? ` Đồng bộ ${replacedCount} thay đổi hộ thay thế (hộ dự phòng vào mẫu / hộ mẫu cũ đã thay).` : '') +
-              (counts.skippedCount ? ` Bỏ qua ${counts.skippedCount} phiếu chưa hoàn thành hoặc thiếu nội dung.` : '') +
-              (counts.progressSynced ? '' : ' Dữ liệu đã lưu cục bộ nhưng chưa đồng bộ số đếm tiến độ lên Firebase.')
-              : 'Không có phiếu hoàn thành đủ nội dung để cập nhật.'
+            success: hasImportedRecords || Boolean(counts.duplicateCount),
+            areaDetails: counts.areaDetails,
+            message: (() => {
+              const dup = counts.duplicateCount || 0;
+              const added = counts.updatedCount + counts.newCount;
+              // Số hộ đã nhập phiếu có trong file (để người đọc so sánh)
+              const totalInFile = workPackage.entries.reduce(
+                (sum, entry) => sum + entry.households.filter(h =>
+                  Boolean(h.questionnaire) && ['DA_HOAN_THANH', 'DA_DUYET'].includes(String(h.surveyStatus || '').toUpperCase())
+                ).length,
+                0
+              );
+              if (!hasImportedRecords) {
+                if (dup > 0) {
+                  return `File có ${totalInFile} hộ đã nhập phiếu. Máy Admin ĐÃ CÓ phiếu của các hộ này rồi nên không có hộ mới. ` +
+                    'Không cần nạp lại và ĐTV không cần xuất lại.';
+                }
+                return 'File này không có hộ nào đã hoàn thành phiếu để nạp (các hộ còn chưa nhập hoặc thiếu nội dung).';
+              }
+              return `File có ${totalInFile} hộ đã nhập phiếu → NẠP MỚI ${added} hộ` +
+                (dup > 0 ? `, BỎ QUA ${dup} hộ máy Admin đã có sẵn` : '') +
+                ` (${counts.areaCount} địa bàn).` +
+                (partialCount ? ` Nạp thêm ${partialCount} hộ đang nhập dở.` : '') +
+                (counts.incompleteHouseholds?.length ? ` Có ${counts.incompleteHouseholds.length} hộ chưa hoàn thành hoặc thiếu thông tin (xem danh sách bên dưới).` : '') +
+                (counts.problems?.length ? ` Có ${counts.problems.length} hộ/địa bàn không nạp được (xem bên dưới).` : '') +
+                (replacedCount ? ` Đồng bộ ${replacedCount} thay đổi hộ thay thế.` : '') +
+                (counts.progressSynced ? '' : ' Dữ liệu đã lưu trên máy nhưng chưa đồng bộ tiến độ lên Firebase (bấm "Gửi lại tiến độ" ở tab Tiến độ sau).');
+            })()
           });
         } catch (fileErr) {
           // Một file lỗi không làm mất kết quả của các file đã nạp trước đó
@@ -751,7 +773,7 @@ export default function AreaDataTransferModal({
 
               {/* Kết quả sau khi nạp */}
               {importResults.length > 0 && (
-                <div className="bg-white rounded border border-emerald-200 p-2.5 max-h-44 overflow-y-auto flex flex-col gap-1.5">
+                <div className="bg-white rounded border border-emerald-200 p-2.5 max-h-[28rem] overflow-y-auto flex flex-col gap-1.5">
                   <div className="font-bold text-emerald-900 text-xs">Kết quả tổng hợp dữ liệu:</div>
                   {importResults.map((res, idx) => (
                     <div 
@@ -760,9 +782,52 @@ export default function AreaDataTransferModal({
                         res.success ? 'bg-emerald-50 border-emerald-200 text-emerald-900' : 'bg-rose-50 border-rose-200 text-rose-900'
                       }`}
                     >
-                      <div>
+                      <div className="min-w-0 flex-1">
                         <strong className="block font-mono">{res.fileName}</strong>
                         <span>{res.message}</span>
+                        {res.areaDetails && res.areaDetails.length > 0 && (() => {
+                          const sum = (key: 'inFile' | 'added' | 'duplicate' | 'partial') =>
+                            res.areaDetails!.reduce((total, d) => total + d[key], 0);
+                          return (
+                            <div className="mt-1.5 overflow-x-auto max-h-64 overflow-y-auto border border-slate-300 rounded bg-white text-slate-800">
+                              <table className="w-full border-collapse text-[11px]">
+                                <thead className="sticky top-0 bg-slate-100">
+                                  <tr>
+                                    <th className="border border-slate-300 px-1.5 py-1 text-left">Xã/Phường</th>
+                                    <th className="border border-slate-300 px-1.5 py-1 text-left">Địa bàn</th>
+                                    <th className="border border-slate-300 px-1.5 py-1 text-left">ĐTV</th>
+                                    <th className="border border-slate-300 px-1.5 py-1 text-right">Hộ có phiếu trong file</th>
+                                    <th className="border border-slate-300 px-1.5 py-1 text-right bg-emerald-100">Nạp mới</th>
+                                    <th className="border border-slate-300 px-1.5 py-1 text-right">Đã có, bỏ qua</th>
+                                    <th className="border border-slate-300 px-1.5 py-1 text-right">Đang nhập dở</th>
+                                  </tr>
+                                </thead>
+                                <tbody>
+                                  {res.areaDetails!.map((d, i) => (
+                                    <tr key={i} className={d.added > 0 ? 'bg-emerald-50/60' : ''}>
+                                      <td className="border border-slate-200 px-1.5 py-0.5">{d.communeName}</td>
+                                      <td className="border border-slate-200 px-1.5 py-0.5">ĐB {d.areaCode}{d.areaName ? ` - ${d.areaName}` : ''}</td>
+                                      <td className="border border-slate-200 px-1.5 py-0.5">{d.surveyorName}</td>
+                                      <td className="border border-slate-200 px-1.5 py-0.5 text-right">{d.inFile}</td>
+                                      <td className="border border-slate-200 px-1.5 py-0.5 text-right font-bold text-emerald-800">{d.added}</td>
+                                      <td className="border border-slate-200 px-1.5 py-0.5 text-right text-slate-600">{d.duplicate}</td>
+                                      <td className="border border-slate-200 px-1.5 py-0.5 text-right text-amber-800">{d.partial}</td>
+                                    </tr>
+                                  ))}
+                                </tbody>
+                                <tfoot className="sticky bottom-0 bg-slate-100 font-extrabold">
+                                  <tr>
+                                    <td colSpan={3} className="border border-slate-300 px-1.5 py-1 text-right">TỔNG ({res.areaDetails!.length} địa bàn)</td>
+                                    <td className="border border-slate-300 px-1.5 py-1 text-right">{sum('inFile')}</td>
+                                    <td className="border border-slate-300 px-1.5 py-1 text-right text-emerald-800 bg-emerald-100">{sum('added')}</td>
+                                    <td className="border border-slate-300 px-1.5 py-1 text-right">{sum('duplicate')}</td>
+                                    <td className="border border-slate-300 px-1.5 py-1 text-right text-amber-800">{sum('partial')}</td>
+                                  </tr>
+                                </tfoot>
+                              </table>
+                            </div>
+                          );
+                        })()}
                       </div>
                       {res.success ? (
                         <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
