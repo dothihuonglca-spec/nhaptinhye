@@ -4077,17 +4077,19 @@ export default function App() {
       }
       let updatedEntryCount = 0;
       let structureChanged = false;
+      // So mã xã / mã địa bàn theo kiểu chuẩn hoá (bỏ khoảng trắng, bỏ số 0 đứng đầu, số = chữ) để "001" = "1" = 1
+      const codeKey = (v: unknown) => String(v ?? '').trim().replace(/^0+/, '').toUpperCase();
       const isInLocalArea = (household: Household) =>
         household.areaId === localArea.id ||
-        (household.areaCode === localArea.code && (
+        (codeKey(household.areaCode) !== '' && codeKey(household.areaCode) === codeKey(localArea.code) && (
           household.communeId === localCommune.id ||
-          household.communeCode === localCommune.communeCode
+          (codeKey(household.communeCode) !== '' && codeKey(household.communeCode) === codeKey(localCommune.communeCode))
         ));
       const incomingBelongsToEntry = (incoming: Household) =>
         incoming.areaId === entry.area.id ||
-        (incoming.areaCode === entry.area.code && (
+        (codeKey(incoming.areaCode) !== '' && codeKey(incoming.areaCode) === codeKey(entry.area.code) && (
           incoming.communeId === entry.commune.id ||
-          incoming.communeCode === entry.commune.communeCode
+          (codeKey(incoming.communeCode) !== '' && codeKey(incoming.communeCode) === codeKey(entry.commune.communeCode))
         ));
       // Khớp hộ: mã hộ -> (STT gốc + tên chủ hộ) -> STT mẫu. Hộ thay thế KHÔNG khớp theo STT mẫu
       // vì nó có thể mang lại STT mẫu của hộ bị thay (sẽ ghi đè nhầm lên hộ mẫu gốc).
@@ -4272,11 +4274,7 @@ export default function App() {
           skippedIncompleteCount++;
           continue;
         }
-        const belongsToEntry = incoming.areaId === entry.area.id ||
-          (incoming.areaCode === entry.area.code && (
-            incoming.communeId === entry.commune.id ||
-            incoming.communeCode === entry.commune.communeCode
-          ));
+        const belongsToEntry = incomingBelongsToEntry(incoming);
         if (!belongsToEntry) {
           importProblems.push(`${entryLabel}: hộ ${incoming.sttMau || incoming.id} không thuộc địa bàn này, đã bỏ qua hộ đó.`);
           continue;
@@ -4302,13 +4300,7 @@ export default function App() {
         }
         const existing = nextHouseholds[householdIndex];
         // Ghi đè: file của ĐTV là bản chuẩn, hộ đã có trên máy Admin vẫn được cập nhật theo file.
-        if (
-          existing.areaId !== localArea.id &&
-          !(existing.areaCode === localArea.code && (
-            existing.communeId === localCommune.id ||
-            existing.communeCode === localCommune.communeCode
-          ))
-        ) {
+        if (!isInLocalArea(existing)) {
           importProblems.push(`${entryLabel}: hộ ${incoming.sttMau || incoming.id} khớp với địa bàn khác trong bảng kê, đã bỏ qua hộ đó.`);
           continue;
         }
@@ -4382,8 +4374,8 @@ export default function App() {
         const samePlace = (h: Household, r: Household) =>
           isInLocalArea(h) ||
           (Boolean(h.areaId) && h.areaId === r.areaId) ||
-          (norm(h.areaCode) !== '' && norm(h.areaCode) === norm(r.areaCode) && (
-            (norm(h.communeCode) !== '' && norm(h.communeCode) === norm(r.communeCode)) ||
+          (codeKey(h.areaCode) !== '' && codeKey(h.areaCode) === codeKey(r.areaCode) && (
+            (codeKey(h.communeCode) !== '' && codeKey(h.communeCode) === codeKey(r.communeCode)) ||
             (Boolean(h.communeId) && h.communeId === r.communeId)
           ));
         const markReplaced = (index: number, by: Household) => {
