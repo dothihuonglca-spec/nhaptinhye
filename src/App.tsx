@@ -4189,6 +4189,57 @@ export default function App() {
         structureChanged = true;
       }
 
+      // BƯỚC 1c: đồng bộ NGUYÊN TRẠNG từng hộ ĐTV gửi (tên chủ hộ, trạng thái mẫu, STT mẫu, nhân khẩu, ngành, ghi chú...).
+      // Hộ chưa có trên máy Admin và chưa có phiếu thì thêm mới; hộ có phiếu sẽ được thêm ở BƯỚC 2.
+      for (const incoming of entry.households) {
+        if (!incomingBelongsToEntry(incoming)) continue;
+        const incomingHasContent = Boolean(incoming.questionnaire) && hasCompletedSurveyContent(incoming.questionnaire);
+        const idx = findIncomingIndex(incoming);
+        if (idx < 0) {
+          if (incomingHasContent) continue;
+          const createdHousehold: Household = {
+            ...incoming,
+            communeId: localCommune.id,
+            communeCode: localCommune.communeCode,
+            communeName: incoming.communeName || localCommune.communeName,
+            areaId: localArea.id,
+            areaCode: localArea.code,
+            assignedSurveyorId: resolvedSurveyorId,
+            assignedSurveyorName: resolvedSurveyorName
+          };
+          nextHouseholds.push(createdHousehold);
+          const newIndex = nextHouseholds.length - 1;
+          householdIndexById.set(createdHousehold.id, newIndex);
+          householdIndexByCompositeKey.set(householdCompositeKey(createdHousehold), newIndex);
+          addedReplacementCount++;
+          structureChanged = true;
+          continue;
+        }
+        const current = nextHouseholds[idx];
+        if (!isInLocalArea(current)) continue;
+        const synced: Household = { ...current };
+        const incomingName = (incoming.householdHead || '').trim();
+        if (incomingName) synced.householdHead = incomingName;
+        if (incoming.sampleStatus) synced.sampleStatus = incoming.sampleStatus;
+        if (incoming.sttMau) synced.sttMau = incoming.sttMau;
+        if (incoming.address) synced.address = incoming.address;
+        if (incoming.phone) synced.phone = incoming.phone;
+        if (incoming.membersCount != null) synced.membersCount = incoming.membersCount;
+        if (incoming.workingMembersCount != null) synced.workingMembersCount = incoming.workingMembersCount;
+        if (incoming.sectorCode) synced.sectorCode = incoming.sectorCode;
+        if (incoming.sectorName) synced.sectorName = incoming.sectorName;
+        if (incoming.note && incoming.note.length >= (current.note || '').length) synced.note = incoming.note;
+        synced.assignedSurveyorId = resolvedSurveyorId;
+        synced.assignedSurveyorName = resolvedSurveyorName;
+        const structuralKeys = ['householdHead', 'sampleStatus', 'sttMau', 'address', 'phone', 'membersCount',
+          'workingMembersCount', 'sectorCode', 'sectorName', 'note', 'assignedSurveyorId', 'assignedSurveyorName'] as const;
+        if (structuralKeys.some(key => synced[key] !== current[key])) {
+          synced.updatedAt = incoming.updatedAt || workPackage.exportedAt;
+          nextHouseholds[idx] = synced;
+          structureChanged = true;
+        }
+      }
+
       // BƯỚC 2: nạp phiếu hoàn thành
       const entryLabel = `${entry.commune.communeName || entry.commune.communeCode} - ĐB ${entry.area.code}`;
       let entryAdded = 0;
@@ -4273,11 +4324,7 @@ export default function App() {
         }
         const existingIsCompleted = isCompletedSurveyStatus(existing.surveyStatus) &&
           hasCompletedSurveyContent(existing.questionnaire);
-        // Hộ đang nhập dở KHÔNG được ghi đè lên phiếu đã hoàn thành sẵn có trên máy Admin
-        if (isPartialIncoming && existingIsCompleted) {
-          noteIncomplete(incoming, 'Đang nhập dở', ['Phiếu trong file chưa hoàn thành (Admin đang giữ bản hoàn thành, không bị ghi đè)']);
-          continue;
-        }
+        // Chép đè hết: file ĐTV là bản chuẩn, kể cả hộ đang nhập dở.
         const incomingStatus = String(incoming.surveyStatus || '').toUpperCase();
         const progressStatus: SurveyStatus = isPartialIncoming
           ? 'DANG_NHAP'
@@ -5902,8 +5949,7 @@ export default function App() {
     let skippedNoArea = 0;
     households.forEach(h => {
       const content = hasContent(h);
-      const structural = isReplacedSampleStatus(h.sampleStatus) || isReplacementHousehold(h);
-      if (!content && !structural) return;
+      // Lấy MỌI hộ của địa bàn (kể cả hộ chỉ sửa tên, hộ thay thế, hộ chưa nhập); địa bàn không có phiếu nào thì lọc ở bước sau
       // ĐTV: toàn bộ hộ trên máy là của chính mình. Admin/Quản lý/Giám sát: lấy theo ĐTV được gán cho hộ.
       const ownerId = isSurveyorUser ? currentUser.id : h.assignedSurveyorId;
       if (!ownerId) {
@@ -5933,13 +5979,13 @@ export default function App() {
     });
     // Chỉ giữ địa bàn thật sự có phiếu (hộ thay thế đi kèm được giữ trong địa bàn đó)
     const entries: SurveyWorkPackageEntry[] = Array.from(groups.values())
-      .filter(g => g.hasData)
+      .filter(g => isSurveyorUser || g.hasData)
       .map(({ hasData, ...entry }) => entry)
       .sort((a, b) =>
         String(a.commune.communeCode).localeCompare(String(b.commune.communeCode), 'vi', { numeric: true }) ||
         String(a.area.code).localeCompare(String(b.area.code), 'vi', { numeric: true })
       );
-    if (entries.length === 0) {
+    if (entries.length === 0 || (isSurveyorUser && !Array.from(groups.values()).some(g => g.hasData))) {
       showNotification('error', 'Chưa có phiếu nào đã nhập trên máy này để xuất.');
       return;
     }
