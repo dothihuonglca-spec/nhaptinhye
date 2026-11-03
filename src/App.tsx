@@ -2838,10 +2838,11 @@ export default function App() {
       }
 
       // 10. Mặc định ẩn hộ dự phòng khỏi danh sách (chỉ hiện khi cần thay mẫu ấn vào hoặc khi bật hiển thị)
+      // Hộ mẫu cũ đã được thay (ĐÃ THAY THẾ) cũng ẩn theo: mỗi địa bàn chỉ hiện đúng các hộ chính thức đang điều tra.
       if (!showReserveHouseholds) {
         const status = (h.sampleStatus || '').toUpperCase();
         const isReserve = status.includes('DỰ PHÒNG') || status.includes('DP') || h.sttMau === 'DP';
-        if (isReserve) return false;
+        if (isReserve || isReplacedSampleStatus(h.sampleStatus)) return false;
       }
 
       return true;
@@ -4418,7 +4419,13 @@ export default function App() {
           if (found.length !== 1 && byGoc.length === 1) found = byGoc;
           if (found.length === 1) {
             markReplaced(found[0].index, replacement);
-          } else if (info) {
+          } else if (info && !nextHouseholds.some(h =>
+            h.id !== replacement.id &&
+            samePlace(h, replacement) &&
+            isReplacedSampleStatus(h.sampleStatus) &&
+            (sameHouseholdName(h.householdHead, info.originalHead) || (mau !== '' && norm(h.sttMau) === mau))
+          )) {
+            // Chỉ báo khi thật sự không có hộ gốc nào (kể cả hộ đã được đánh dấu "ĐÃ THAY THẾ" từ trước)
             const sample = candidates.slice(0, 8).map(({ household }) => `${household.sttMau || '?'}-${household.householdHead}`).join('; ');
             importProblems.push(`${entryLabel}: hộ thay thế ${replacement.householdHead} (STT ${replacement.sttMau || ''}) chưa xác định được hộ gốc ${info.originalHead} (khớp tên ${byName.length}, STT mẫu ${byMau.length}, STT gốc ${byGoc.length}). Hộ chưa nhập trong địa bàn: ${sample || 'không có'}.`);
           }
@@ -7914,7 +7921,7 @@ export default function App() {
                   }`}
                   title="Mặc định ẩn hộ dự phòng. Bấm để hiển thị cả hộ dự phòng"
                 >
-                  <span>{showReserveHouseholds ? 'Hiện hộ dự phòng' : 'Ẩn hộ dự phòng'}</span>
+                  <span>{showReserveHouseholds ? 'Hiện hộ dự phòng / đã thay thế' : 'Ẩn hộ dự phòng / đã thay thế'}</span>
                 </button>
               </div>
 
