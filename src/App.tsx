@@ -68,6 +68,7 @@ import {
   findHouseholdBySourceKey,
   markOriginalAsReplaced,
   type IncompleteHouseholdInfo,
+  type AreaImportDetail,
   createAllSurveyorsResultPackage,
   createSurveyorAllResultsPackage,
   type SurveyWorkPackageEntry
@@ -300,6 +301,14 @@ export default function App() {
   const [currentSurveyorId, setCurrentSurveyorId] = useState<string>('admin');
   const [loading, setLoading] = useState<boolean>(false);
   const [localDataReady, setLocalDataReady] = useState<boolean>(false);
+  // Mở kho dữ liệu trên máy bị lỗi: KHÔNG được cho lưu đè dữ liệu mặc định lên dữ liệu thật
+  const [localLoadFailed, setLocalLoadFailed] = useState<boolean>(false);
+  // Có cửa sổ/tab khác của app vừa lưu dữ liệu: tab này đang giữ bản cũ, không được lưu đè
+  const [staleTabNotice, setStaleTabNotice] = useState<boolean>(false);
+  const staleTabRef = useRef<boolean>(false);
+  const tabIdRef = useRef<string>(Math.random().toString(36).slice(2));
+  const dataChannelRef = useRef<BroadcastChannel | null>(null);
+  const firstSaveDoneRef = useRef<boolean>(false);
   const [cloudProgress, setCloudProgress] = useState<AreaProgressSnapshot[]>([]);
   const [cloudStatus, setCloudStatus] = useState<CloudStatus>({ state: 'idle' });
   const [cloudReloadKey, setCloudReloadKey] = useState<number>(0);
@@ -446,7 +455,10 @@ export default function App() {
   useEffect(() => {
     let cancelled = false;
     const initializeLocalData = async () => {
+      let failed = false;
       try {
+        // Xin trình duyệt giữ dữ liệu lâu dài (không tự xóa khi máy thiếu dung lượng)
+        try { void navigator.storage?.persist?.(); } catch (e) { /* bỏ qua */ }
         const snapshot = await loadLocalDataSnapshot();
         if (cancelled) return;
         if (snapshot) {
@@ -460,8 +472,10 @@ export default function App() {
         }
         localStorage.removeItem('cached_households');
       } catch (err) {
+        failed = true;
         console.error('Không thể mở kho dữ liệu cục bộ:', err);
         if (!cancelled) {
+          setLocalLoadFailed(true);
           setNotification({
             type: 'error',
             message: 'Không mở được kho dữ liệu cục bộ. Hãy dùng trình duyệt hỗ trợ IndexedDB và không xóa dữ liệu trang web.'
@@ -469,7 +483,8 @@ export default function App() {
         }
       } finally {
         if (!cancelled) {
-          setLocalDataReady(true);
+          // Mở lỗi thì KHÔNG bật chế độ lưu, tránh ghi đè dữ liệu thật bằng dữ liệu mặc định
+          if (!failed) setLocalDataReady(true);
           setLoading(false);
         }
       }
@@ -480,9 +495,35 @@ export default function App() {
     };
   }, []);
 
+  // Báo cho các tab khác của app biết dữ liệu vừa được lưu (tab đang giữ bản cũ sẽ được cảnh báo, không lưu đè)
+  useEffect(() => {
+    if (typeof BroadcastChannel === 'undefined') return;
+    const channel = new BroadcastChannel('nhaptin-local-data');
+    dataChannelRef.current = channel;
+    channel.onmessage = (event: MessageEvent) => {
+      if (event.data?.type === 'saved' && event.data.tabId !== tabIdRef.current) {
+        staleTabRef.current = true;
+        setStaleTabNotice(true);
+      }
+    };
+    return () => {
+      channel.close();
+      dataChannelRef.current = null;
+    };
+  }, []);
+
   useEffect(() => {
     if (!localDataReady) return;
+    if (staleTabRef.current) return;
     void saveLocalDataSnapshot({ communes, areas, households, surveyors, departments })
+      .then(() => {
+        // Lần lưu đầu tiên sau khi mở app chỉ là ghi lại đúng dữ liệu vừa đọc, không cần báo tab khác
+        if (!firstSaveDoneRef.current) {
+          firstSaveDoneRef.current = true;
+          return;
+        }
+        dataChannelRef.current?.postMessage({ type: 'saved', tabId: tabIdRef.current });
+      })
       .catch(err => {
         console.error('Không thể lưu dữ liệu nghiệp vụ trên thiết bị:', err);
         setNotification({
@@ -3967,6 +4008,8 @@ export default function App() {
     let partialImportedCount = 0;
     // Chế độ chỉ lấy hộ mới (file gộp của tất cả ĐTV): đếm số hộ trùng đã bỏ qua
     let duplicateSkippedCount = 0;
+    // Chi tiết từng địa bàn: có bao nhiêu hộ trong file, nạp mới bao nhiêu, đã có sẵn bao nhiêu
+    const areaDetails: AreaImportDetail[] = [];
     // Danh sách hộ chính thức chưa hoàn thành hoặc còn thiếu thông tin để báo cho Admin
     const incompleteHouseholds: IncompleteHouseholdInfo[] = [];
     // Các lỗi theo từng địa bàn/hộ: một hộ lỗi không được làm mất cả địa bàn hay cả file
@@ -4148,6 +4191,12 @@ export default function App() {
 
       // BƯỚC 2: nạp phiếu hoàn thành
       const entryLabel = `${entry.commune.communeName || entry.commune.communeCode} - ĐB ${entry.area.code}`;
+      let entryAdded = 0;
+      let entryDuplicate = 0;
+      let entryPartial = 0;
+      const entryInFile = entry.households.filter(h =>
+        Boolean(h.questionnaire) && isCompletedSurveyStatus(h.surveyStatus) && hasCompletedSurveyContent(h.questionnaire)
+      ).length;
       const noteIncomplete = (incoming: Household, status: string, reasons: string[]) => {
         // Chỉ báo các hộ CHÍNH THỨC (hộ dự phòng chưa dùng, hộ đã thay thế không cần báo)
         if (!isOfficialSampleStatus(incoming.sampleStatus)) return;
@@ -4193,6 +4242,7 @@ export default function App() {
           hasCompletedSurveyContent(existing.questionnaire)
         ) {
           duplicateSkippedCount++;
+          entryDuplicate++;
           continue;
         }
         if (
@@ -4232,6 +4282,9 @@ export default function App() {
           incomingTime < existingTime &&
           existingIsCompleted
         ) {
+          // Máy Admin đã có bản phiếu hoàn thành mới hơn: coi như đã có, không ghi đè
+          duplicateSkippedCount++;
+          entryDuplicate++;
           continue;
         }
         const incomingStatus = String(incoming.surveyStatus || '').toUpperCase();
@@ -4259,9 +4312,11 @@ export default function App() {
         householdIndexByCompositeKey.set(householdCompositeKey(existing), householdIndex);
         if (isPartialIncoming) {
           partialImportedCount++;
+          entryPartial++;
           noteIncomplete(incoming, 'Đang nhập dở', ['Đang nhập dở, chưa bấm Lưu & Hoàn thành']);
         } else {
           updatedCount++;
+          entryAdded++;
           // Hộ đã hoàn thành nhưng còn thiếu thông tin / số liệu chưa hợp lệ: vẫn nạp nhưng báo cho Admin
           const reasons: string[] = [];
           if (!(Number(incoming.membersCount) > 0)) reasons.push('Thiếu số nhân khẩu');
@@ -4274,6 +4329,16 @@ export default function App() {
         }
         updatedEntryCount++;
       }
+      areaDetails.push({
+        communeName: entry.commune.communeName || entry.commune.communeCode,
+        areaCode: entry.area.code,
+        areaName: entry.area.name || '',
+        surveyorName: resolvedSurveyorName,
+        inFile: entryInFile,
+        added: entryAdded,
+        duplicate: entryDuplicate,
+        partial: entryPartial
+      });
       if (updatedEntryCount > 0 || structureChanged) {
         const areaKey = getAreaProgressKey(localCommune.communeCode, localArea.code);
         processedAreas.set(`${resolvedSurveyorId}:${areaKey}`, {
@@ -4351,6 +4416,7 @@ export default function App() {
       skippedCount: skippedIncompleteCount,
       partialCount: partialImportedCount,
       duplicateCount: duplicateSkippedCount,
+      areaDetails,
       incompleteHouseholds,
       problems: importProblems
     };
@@ -6683,6 +6749,28 @@ export default function App() {
     );
   }
 
+  // Không mở được kho dữ liệu trên máy: dừng hẳn, KHÔNG cho dùng dữ liệu mặc định (tránh ghi đè mất dữ liệu thật)
+  if (localLoadFailed) {
+    return (
+      <div className="min-h-screen bg-slate-900 text-white flex items-center justify-center p-6">
+        <div className="max-w-md bg-rose-950 border border-rose-500 rounded-xl p-5 text-sm leading-relaxed flex flex-col gap-3">
+          <div className="font-extrabold text-base text-rose-200">Không mở được dữ liệu đã lưu trên máy</div>
+          <div>
+            Phần mềm tạm dừng để <b>không ghi đè mất dữ liệu của bạn</b>. Dữ liệu vẫn còn trong trình duyệt.
+            Hãy thử: tải lại trang, đóng các cửa sổ/tab khác của phần mềm, không dùng chế độ ẩn danh, và <b>không xóa dữ liệu trang web</b>.
+          </div>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="self-start px-4 py-2 bg-white text-rose-900 rounded font-bold cursor-pointer"
+          >
+            Tải lại trang
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (!isLoggedIn) {
     if (!localDataReady) {
       return (
@@ -6841,6 +6929,21 @@ export default function App() {
   return (
     <div className="min-h-screen bg-sky-50 text-slate-900 font-sans flex flex-col antialiased selection:bg-sky-200">
       
+      {staleTabNotice && (
+        <div className="fixed top-0 inset-x-0 z-[200] bg-amber-500 text-amber-950 px-4 py-2.5 text-xs font-bold flex items-center justify-between gap-3 shadow-lg">
+          <span>
+            ⚠ Có cửa sổ hoặc tab khác của phần mềm vừa lưu dữ liệu. Cửa sổ này đang giữ bản cũ nên tạm dừng lưu để không ghi đè mất dữ liệu mới.
+            Hãy bấm "Tải lại" để lấy dữ liệu mới nhất (nên chỉ mở 1 cửa sổ phần mềm).
+          </span>
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="shrink-0 px-3 py-1 bg-amber-950 text-amber-100 rounded font-bold cursor-pointer"
+          >
+            Tải lại
+          </button>
+        </div>
+      )}
       {notification && (
         <div className={`fixed top-4 right-4 z-50 px-4 py-3 rounded shadow-lg border flex items-center gap-3 text-xs font-medium transition-all ${
           notification.type === 'success' 
