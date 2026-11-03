@@ -4229,22 +4229,26 @@ export default function App() {
           continue;
         }
 
-        const householdIndex = findIncomingIndex(incoming);
+        let householdIndex = findIncomingIndex(incoming);
         if (householdIndex < 0) {
-          importProblems.push(`${entryLabel}: không khớp được hộ ${incoming.sttMau || incoming.id} (${incoming.householdHead || ''}) trong bảng kê, đã bỏ qua hộ đó.`);
-          continue;
+          // Máy Admin chưa có hộ này (bảng kê thiếu hộ): thêm mới vào địa bàn, không bỏ sót hộ nào của ĐTV
+          const createdHousehold: Household = {
+            ...incoming,
+            communeId: localCommune.id,
+            communeCode: localCommune.communeCode,
+            communeName: incoming.communeName || localCommune.communeName,
+            areaId: localArea.id,
+            areaCode: localArea.code,
+            assignedSurveyorId: resolvedSurveyorId,
+            assignedSurveyorName: resolvedSurveyorName
+          };
+          nextHouseholds.push(createdHousehold);
+          householdIndex = nextHouseholds.length - 1;
+          householdIndexById.set(createdHousehold.id, householdIndex);
+          householdIndexByCompositeKey.set(householdCompositeKey(createdHousehold), householdIndex);
         }
         const existing = nextHouseholds[householdIndex];
-        // Chế độ ONLY_NEW: hộ đã có phiếu trên máy Admin thì bỏ qua, không ghi đè
-        if (
-          workPackage.importMode === 'ONLY_NEW' &&
-          existing.questionnaire &&
-          hasCompletedSurveyContent(existing.questionnaire)
-        ) {
-          duplicateSkippedCount++;
-          entryDuplicate++;
-          continue;
-        }
+        // Ghi đè: file của ĐTV là bản chuẩn, hộ đã có trên máy Admin vẫn được cập nhật theo file.
         if (
           existing.areaId !== localArea.id &&
           !(existing.areaCode === localArea.code && (
@@ -4272,19 +4276,6 @@ export default function App() {
         // Hộ đang nhập dở KHÔNG được ghi đè lên phiếu đã hoàn thành sẵn có trên máy Admin
         if (isPartialIncoming && existingIsCompleted) {
           noteIncomplete(incoming, 'Đang nhập dở', ['Phiếu trong file chưa hoàn thành (Admin đang giữ bản hoàn thành, không bị ghi đè)']);
-          continue;
-        }
-        const incomingTime = Date.parse(incoming.updatedAt || workPackage.exportedAt);
-        const existingTime = Date.parse(existing.updatedAt || '');
-        if (
-          Number.isFinite(existingTime) &&
-          Number.isFinite(incomingTime) &&
-          incomingTime < existingTime &&
-          existingIsCompleted
-        ) {
-          // Máy Admin đã có bản phiếu hoàn thành mới hơn: coi như đã có, không ghi đè
-          duplicateSkippedCount++;
-          entryDuplicate++;
           continue;
         }
         const incomingStatus = String(incoming.surveyStatus || '').toUpperCase();
