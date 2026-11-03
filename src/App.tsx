@@ -4369,11 +4369,23 @@ export default function App() {
         }
         updatedEntryCount++;
       }
-      // BƯỚC 3: dọn hộ gốc đã bị thay nhưng còn nằm ở trạng thái CHÍNH THỨC (không phụ thuộc mã hộ giữa 2 máy).
-      // Mỗi hộ thay thế phải làm hộ gốc của nó thành "ĐÃ THAY THẾ" để địa bàn chỉ còn đúng số hộ chính thức.
+      // BƯỚC 3: dọn hộ gốc đã bị thay nhưng còn nằm ở trạng thái CHÍNH THỨC.
+      // Không phụ thuộc mã hộ / mã địa bàn nội bộ giữa 2 máy: lấy "cùng địa bàn" theo đúng mã xã + mã địa bàn
+      // mà bảng đang hiển thị, rồi tìm hộ gốc theo tên chủ hộ, STT mẫu, STT gốc.
       {
         const stampNow = workPackage.exportedAt;
+        const norm = (v?: string) => String(v ?? '').trim();
         const hasDone = (h: Household) => isCompletedSurveyStatus(h.surveyStatus) && hasCompletedSurveyContent(h.questionnaire);
+        const isReserveStatus = (h: Household) => /DU PHONG/.test(
+          (h.sampleStatus || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[đĐ]/g, 'D').toUpperCase()
+        );
+        const samePlace = (h: Household, r: Household) =>
+          isInLocalArea(h) ||
+          (Boolean(h.areaId) && h.areaId === r.areaId) ||
+          (norm(h.areaCode) !== '' && norm(h.areaCode) === norm(r.areaCode) && (
+            (norm(h.communeCode) !== '' && norm(h.communeCode) === norm(r.communeCode)) ||
+            (Boolean(h.communeId) && h.communeId === r.communeId)
+          ));
         const markReplaced = (index: number, by: Household) => {
           const original = nextHouseholds[index];
           nextHouseholds[index] = {
@@ -4385,40 +4397,80 @@ export default function App() {
           markedReplacedCount++;
           structureChanged = true;
         };
-        const areaIndexes = () => nextHouseholds
-          .map((household, index) => ({ household, index }))
-          .filter(({ household }) => isInLocalArea(household));
-        const replacementsInArea = areaIndexes()
-          .filter(({ household }) => isReplacementHousehold(household) && !isReplacedSampleStatus(household.sampleStatus));
-        for (const { household: replacement } of replacementsInArea) {
-          const candidates = () => areaIndexes().filter(({ household }) =>
-            household.id !== replacement.id &&
-            isOfficialSampleStatus(household.sampleStatus) &&
-            !isReplacedSampleStatus(household.sampleStatus) &&
-            !isReplacementHousehold(household) &&
-            !hasDone(household)
-          );
+        const replacementList = nextHouseholds.filter(h =>
+          isReplacementHousehold(h) && !isReplacedSampleStatus(h.sampleStatus) && (isInLocalArea(h) || incomingBelongsToEntry(h))
+        );
+        for (const replacement of replacementList) {
           const info = parseReplacementNote(replacement.note);
-          // (1) cùng tên chủ hộ gốc ghi trong ghi chú thay thế
-          let found = info
-            ? candidates().filter(({ household }) => sameHouseholdName(household.householdHead, info.originalHead))
-            : [];
-          // (2) cùng STT mẫu với hộ thay thế
-          if (found.length !== 1) {
-            const mau = String(replacement.sttMau ?? '').trim();
-            found = mau && mau.toUpperCase() !== 'DP'
-              ? candidates().filter(({ household }) => String(household.sttMau ?? '').trim() === mau)
-              : [];
+          const candidates = nextHouseholds
+            .map((household, index) => ({ household, index }))
+            .filter(({ household }) =>
+              household.id !== replacement.id &&
+              samePlace(household, replacement) &&
+              !isReplacedSampleStatus(household.sampleStatus) &&
+              !isReplacementHousehold(household) &&
+              !isReserveStatus(household) &&
+              !hasDone(household)
+            );
+          const mau = norm(replacement.sttMau);
+          const byName = info ? candidates.filter(({ household }) => sameHouseholdName(household.householdHead, info.originalHead)) : [];
+          const byMau = mau && mau.toUpperCase() !== 'DP' ? candidates.filter(({ household }) => norm(household.sttMau) === mau) : [];
+          const byGoc = info && norm(info.originalSttGoc) ? candidates.filter(({ household }) => norm(household.sttGoc) === norm(info.originalSttGoc)) : [];
+          let found: typeof candidates = [];
+          if (byName.length === 1) found = byName;
+          else if (byName.length > 1) {
+            const narrowed = byName.filter(({ household }) => norm(household.sttMau) === mau || (norm(info?.originalSttGoc) !== '' && norm(household.sttGoc) === norm(info?.originalSttGoc)));
+            if (narrowed.length === 1) found = narrowed;
           }
+          if (found.length !== 1 && byMau.length === 1) found = byMau;
+          if (found.length !== 1 && byGoc.length === 1) found = byGoc;
           if (found.length === 1) {
             markReplaced(found[0].index, replacement);
           } else if (info) {
-            importProblems.push(`${entryLabel}: hộ thay thế ${replacement.householdHead} (STT ${replacement.sttMau || ''}) chưa xác định được hộ gốc ${info.originalHead} để đánh dấu "đã thay thế" (tìm thấy ${found.length} hộ). Kiểm tra tay hộ gốc.`);
+            const sample = candidates.slice(0, 8).map(({ household }) => `${household.sttMau || '?'}-${household.householdHead}`).join('; ');
+            importProblems.push(`${entryLabel}: hộ thay thế ${replacement.householdHead} (STT ${replacement.sttMau || ''}) chưa xác định được hộ gốc ${info.originalHead} (khớp tên ${byName.length}, STT mẫu ${byMau.length}, STT gốc ${byGoc.length}). Hộ chưa nhập trong địa bàn: ${sample || 'không có'}.`);
           }
         }
-        const officialLeft = areaIndexes().filter(({ household }) => isOfficialSurveyHousehold(household)).length;
-        if (officialLeft > OFFICIAL_HOUSEHOLDS_PER_AREA) {
-          importProblems.push(`${entryLabel}: sau khi nạp địa bàn có ${officialLeft} hộ chính thức (chuẩn ${OFFICIAL_HOUSEHOLDS_PER_AREA} hộ). Cần kiểm tra hộ trùng hoặc hộ thay thế chưa đúng.`);
+        // Lớp chặn cuối: địa bàn chỉ được đúng OFFICIAL_HOUSEHOLDS_PER_AREA hộ chính thức.
+        // Dư bao nhiêu thì loại (chuyển "ĐÃ THAY THẾ") bấy nhiêu hộ CHƯA NHẬP, ưu tiên hộ không có trong danh sách chính thức ĐTV gửi.
+        const officialNow = () => nextHouseholds
+          .map((household, index) => ({ household, index }))
+          .filter(({ household }) => isInLocalArea(household) && isOfficialSurveyHousehold(household));
+        let surplus = officialNow().length - OFFICIAL_HOUSEHOLDS_PER_AREA;
+        if (surplus > 0) {
+          const fileOfficial = entry.households.filter(h => isOfficialSurveyHousehold(h));
+          const inFileOfficial = (h: Household) => fileOfficial.some(f => f.id === h.id || sameHouseholdName(f.householdHead, h.householdHead));
+          const hasAnyContent = (h: Household) => Boolean(h.questionnaire) && hasCompletedSurveyContent(h.questionnaire);
+          const current = officialNow();
+          const mauCount = new Map<string, number>();
+          current.forEach(({ household }) => {
+            const key = norm(household.sttMau);
+            if (key) mauCount.set(key, (mauCount.get(key) || 0) + 1);
+          });
+          const removable = current
+            .filter(({ household }) => !hasAnyContent(household) && !isReplacementHousehold(household))
+            .map(({ household, index }) => ({
+              household,
+              index,
+              rank: (!inFileOfficial(household) ? 0 : 4) + ((mauCount.get(norm(household.sttMau)) || 0) > 1 ? 0 : 2)
+            }))
+            .sort((a, b) => a.rank - b.rank || Number(norm(b.household.sttMau)) - Number(norm(a.household.sttMau)));
+          for (const item of removable) {
+            if (surplus <= 0) break;
+            const original = nextHouseholds[item.index];
+            nextHouseholds[item.index] = {
+              ...original,
+              sampleStatus: 'ĐÃ THAY THẾ',
+              note: (original.note ? `${original.note} | ` : '') + `[Loại khỏi mẫu: địa bàn dư hộ so với ${OFFICIAL_HOUSEHOLDS_PER_AREA} hộ chính thức]`,
+              updatedAt: stampNow
+            };
+            markedReplacedCount++;
+            structureChanged = true;
+            surplus--;
+          }
+          if (surplus > 0) {
+            importProblems.push(`${entryLabel}: sau khi nạp địa bàn vẫn dư ${surplus} hộ chính thức so với ${OFFICIAL_HOUSEHOLDS_PER_AREA} hộ (các hộ còn lại đều đã có phiếu). Cần kiểm tra tay.`);
+          }
         }
       }
 
