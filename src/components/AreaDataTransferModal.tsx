@@ -16,11 +16,13 @@ import {
   parseSurveyWorkPackage,
   isAreaAssigned,
   normalizeSurveyorName,
+  isOfficialSurveyHousehold,
+  isCompletedSurveyStatus,
   SurveyWorkPackage,
   type IncompleteHouseholdInfo,
   type AreaImportDetail
 } from '../utils/areaDataTransfer';
-import { parseSurveyorEntryBackup } from '../utils/localDataBackup';
+import { parseSurveyorEntryBackup, hasCompletedSurveyContent } from '../utils/localDataBackup';
 
 function hasJsonRecords(value: unknown): boolean {
   if (Array.isArray(value)) return true;
@@ -413,6 +415,7 @@ export default function AreaDataTransferModal({
     const results: typeof importResults = [];
     const allIncomplete: IncompleteHouseholdInfo[] = [];
     const allProblems: string[] = [];
+    const grand = { files: 0, all: 0, official: 0, completed: 0, inProgress: 0, notStarted: 0 };
 
     try {
       for (const { file, text } of importedFiles) {
@@ -496,14 +499,34 @@ export default function AreaDataTransferModal({
                 ).length,
                 0
               );
+              // Thống kê theo đúng nội dung ĐTV gửi: tổng hộ, hoàn thành, dở dang, chưa nhập (chỉ tính hộ chính thức)
+              const stat = { all: 0, official: 0, completed: 0, inProgress: 0, notStarted: 0 };
+              workPackage.entries.forEach(entry => entry.households.forEach(h => {
+                stat.all++;
+                if (!isOfficialSurveyHousehold(h)) return;
+                stat.official++;
+                const hasContent = Boolean(h.questionnaire) && hasCompletedSurveyContent(h.questionnaire);
+                if (hasContent && isCompletedSurveyStatus(h.surveyStatus)) stat.completed++;
+                else if (hasContent) stat.inProgress++;
+                else stat.notStarted++;
+              }));
+              grand.files++;
+              grand.all += stat.all;
+              grand.official += stat.official;
+              grand.completed += stat.completed;
+              grand.inProgress += stat.inProgress;
+              grand.notStarted += stat.notStarted;
+              const statsText = `Trong file có ${stat.official} hộ chính thức (${workPackage.entries.length} địa bàn): ` +
+                `${stat.completed} hoàn thành, ${stat.inProgress} dở dang, ${stat.notStarted} chưa nhập. ` +
+                `(Tổng ${stat.all} bản ghi, kể cả hộ dự phòng/đã thay thế.) `;
               if (!hasImportedRecords) {
                 if (dup > 0) {
-                  return `File có ${totalInFile} hộ đã nhập phiếu. Máy Admin ĐÃ CÓ phiếu của các hộ này rồi nên không có hộ mới. ` +
+                  return statsText + `File có ${totalInFile} hộ đã nhập phiếu. Máy Admin ĐÃ CÓ phiếu của các hộ này rồi nên không có hộ mới. ` +
                     'Không cần nạp lại và ĐTV không cần xuất lại.';
                 }
-                return 'File này không có hộ nào đã hoàn thành phiếu để nạp (các hộ còn chưa nhập hoặc thiếu nội dung).';
+                return statsText + 'File này không có hộ nào đã hoàn thành phiếu để nạp (các hộ còn chưa nhập hoặc thiếu nội dung).';
               }
-              return `File có ${totalInFile} hộ đã nhập phiếu → NẠP MỚI ${added} hộ` +
+              return statsText + `ĐÃ CHÉP ĐÈ/CẬP NHẬT ${added} hộ có phiếu` +
                 (dup > 0 ? `, BỎ QUA ${dup} hộ máy Admin đã có sẵn` : '') +
                 ` (${counts.areaCount} địa bàn).` +
                 (partialCount ? ` Nạp thêm ${partialCount} hộ đang nhập dở.` : '') +
@@ -524,6 +547,16 @@ export default function AreaDataTransferModal({
             message: fileErr instanceof Error ? fileErr.message : String(fileErr)
           });
         }
+      }
+      if (grand.files > 1) {
+        results.push({
+          fileName: `TỔNG CỘNG (${grand.files} file)`,
+          updatedCount: 0,
+          newCount: 0,
+          areaCount: 0,
+          success: true,
+          message: `Tổng ${grand.official} hộ chính thức: ${grand.completed} hoàn thành, ${grand.inProgress} dở dang, ${grand.notStarted} chưa nhập. (Tổng ${grand.all} bản ghi, kể cả hộ dự phòng/đã thay thế.)`
+        });
       }
       setImportResults(results);
       setIncompleteList(allIncomplete);
