@@ -933,7 +933,7 @@ export function findHouseholdBySourceKey<T extends Household>(
 export function markOriginalAsReplaced<T extends Household>(
   list: T[],
   isInArea: (household: T) => boolean,
-  replacement: Pick<Household, 'householdHead' | 'sttGoc' | 'note' | 'updatedAt'>,
+  replacement: Pick<Household, 'householdHead' | 'sttGoc' | 'sttMau' | 'note' | 'updatedAt'>,
   fallbackTime: string
 ): number {
   const info = parseReplacementNote(replacement.note);
@@ -945,6 +945,23 @@ export function markOriginalAsReplaced<T extends Household>(
       .map((household, i) => ({ household, i }))
       .filter(({ household }) => isInArea(household) && (household.sttGoc || '').trim() === info.originalSttGoc);
     if (bySttGoc.length === 1) index = bySttGoc[0].i;
+  }
+  if (index < 0) {
+    // Dự phòng 2: hộ thay thế mang STT mẫu của hộ bị thay -> tìm hộ chính thức chưa nhập cùng STT mẫu, duy nhất trong địa bàn
+    const mau = String(replacement.sttMau ?? '').trim();
+    if (mau && mau.toUpperCase() !== 'DP') {
+      const bySttMau = list
+        .map((household, i) => ({ household, i }))
+        .filter(({ household }) =>
+          (household as unknown) !== (replacement as unknown) &&
+          isInArea(household) &&
+          isOfficialSampleStatus(household.sampleStatus) &&
+          !isReplacedSampleStatus(household.sampleStatus) &&
+          !isCompletedSurveyStatus(household.surveyStatus) &&
+          String(household.sttMau ?? '').trim() === mau
+        );
+      if (bySttMau.length === 1) index = bySttMau[0].i;
+    }
   }
   if (index < 0) return -1;
   const original = list[index];
