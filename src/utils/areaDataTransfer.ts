@@ -58,8 +58,8 @@ export interface SurveyWorkPackage {
   purpose: 'ASSIGNMENT' | 'RESULTS';
   /** 'ALL_SURVEYORS': file gộp kết quả của NHIỀU ĐTV do Admin/Quản lý/Giám sát xuất (chỉ dùng với purpose RESULTS) */
   scope?: 'ALL_SURVEYORS';
-  /** 'ONLY_NEW': khi nạp, hộ đã có phiếu trên máy Admin thì bỏ qua, chỉ lấy hộ mới */
-  importMode?: 'ONLY_NEW';
+  /** 'OVERWRITE': khi nạp, file của ĐTV là bản chuẩn, chép đè toàn bộ lên máy Admin ('ONLY_NEW' là kiểu cũ, nay không còn tác dụng) */
+  importMode?: 'ONLY_NEW' | 'OVERWRITE';
   exportedAt: string;
   exportedBy: {
     id: string;
@@ -268,7 +268,7 @@ export function createAllSurveyorsResultPackage(
   return {
     ...createSurveyWorkPackage('RESULTS', currentUser, entries),
     scope: 'ALL_SURVEYORS',
-    importMode: 'ONLY_NEW'
+    importMode: 'OVERWRITE'
   };
 }
 
@@ -279,7 +279,7 @@ export function createSurveyorAllResultsPackage(
 ): SurveyWorkPackage {
   return {
     ...createSurveyWorkPackage('RESULTS', currentUser, entries),
-    importMode: 'ONLY_NEW'
+    importMode: 'OVERWRITE'
   };
 }
 
