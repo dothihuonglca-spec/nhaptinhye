@@ -4040,7 +4040,15 @@ export default function App() {
             return { ...e, households: keep };
           })
           .filter(e => e.households.some(isDoneHousehold))
-      : workPackage.entries;
+      : workPackage.entries.filter(e => e.households.some(h =>
+          (Boolean(h.questionnaire) && hasCompletedSurveyContent(h.questionnaire)) ||
+          isReplacedSampleStatus(h.sampleStatus) ||
+          isReplacementHousehold(h) ||
+          /\[Sửa họ tên chủ hộ:/.test(h.note || '')
+        ));
+    // Địa bàn trong file hoàn toàn trống (chưa có phiếu, chưa thay hộ, chưa sửa tên) = bảng kê gốc chưa đụng tới.
+    // Không nạp để KHÔNG ghi đè lên dữ liệu đã có sẵn trên máy Admin (ví dụ file cũ/mới của cùng 1 ĐTV không bù cho nhau).
+    const blankAreasSkipped = completedOnly ? 0 : workPackage.entries.length - entriesToImport.length;
     for (const entry of entriesToImport) {
       try {
       const exactSurveyor = surveyors.find(surveyor =>
@@ -4582,6 +4590,9 @@ export default function App() {
     } catch (err) {
       console.error('Không thể đồng bộ số đếm tiến độ lên Firebase:', err);
       progressSynced = false;
+    }
+    if (blankAreasSkipped > 0) {
+      importProblems.push(`Đã bỏ qua ${blankAreasSkipped} địa bàn trong file còn trống (chưa có phiếu, chưa thay hộ). Dữ liệu các địa bàn này trên máy Admin được giữ nguyên.`);
     }
     if (skippedOtherSurveyorAreas > 0) {
       importProblems.push(`Đã bỏ qua ${skippedOtherSurveyorAreas} địa bàn trong file không thuộc ĐTV gửi file (đang giao cho ĐTV khác). Đây là bình thường, không cần xử lý.`);
