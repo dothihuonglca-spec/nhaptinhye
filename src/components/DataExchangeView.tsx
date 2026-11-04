@@ -144,7 +144,7 @@ export const DataExchangeView: React.FC<Props> = ({
                   color="bg-indigo-800 hover:bg-indigo-700 border-indigo-700"
                   icon={<Download className="w-4 h-4 text-indigo-200" />}
                   label="Xuất 1 file JSON phiếu của TẤT CẢ ĐTV"
-                  sub="Mọi phiếu đã nhập trên máy này; Admin đọc bằng nút 'Đọc trực tiếp JSON do ĐTV xuất ra', hộ trùng bỏ qua, chỉ lấy hộ mới"
+                  sub="Mọi phiếu đã nhập trên máy này; Admin đọc bằng nút 'Đọc trực tiếp JSON do ĐTV xuất ra', dữ liệu trong file được chép đè lên máy Admin"
                 />
               )}
             </>
