@@ -4007,6 +4007,7 @@ export default function App() {
     let skippedIncompleteCount = 0;
     let addedReplacementCount = 0;
     let markedReplacedCount = 0;
+    let skippedOtherSurveyorAreas = 0;
     let updatedStructureCount = 0;
     let partialImportedCount = 0;
     // Chế độ chỉ lấy hộ mới (file gộp của tất cả ĐTV): đếm số hộ trùng đã bỏ qua
@@ -4020,7 +4021,27 @@ export default function App() {
     const userDepartment = departments.find(department =>
       department.id === currentUser.departmentId || department.name === currentUser.department
     );
-    for (const entry of workPackage.entries) {
+    // Chế độ "chỉ lấy hộ đã hoàn thành": bỏ hộ nhập dở / chưa nhập / dự phòng chưa dùng; chỉ giữ hộ hoàn thành
+    // (kèm hộ gốc của hộ thay thế đã hoàn thành để đánh dấu "đã thay thế" cho đúng).
+    const completedOnly = workPackage.importMode === 'COMPLETED_ONLY';
+    const isDoneHousehold = (h: Household) =>
+      Boolean(h.questionnaire) && hasCompletedSurveyContent(h.questionnaire) && isCompletedSurveyStatus(h.surveyStatus);
+    const entriesToImport = completedOnly
+      ? workPackage.entries
+          .map(e => {
+            const done = e.households.filter(isDoneHousehold);
+            const keep = e.households.filter(h =>
+              isDoneHousehold(h) ||
+              (isReplacedSampleStatus(h.sampleStatus) && done.some(d => {
+                const info = isReplacementHousehold(d) ? parseReplacementNote(d.note) : null;
+                return Boolean(info) && sameHouseholdName(h.householdHead, info!.originalHead);
+              }))
+            );
+            return { ...e, households: keep };
+          })
+          .filter(e => e.households.some(isDoneHousehold))
+      : workPackage.entries;
+    for (const entry of entriesToImport) {
       try {
       const exactSurveyor = surveyors.find(surveyor =>
         surveyor.id === entry.surveyorId && surveyor.role === 'SURVEYOR'
@@ -4092,6 +4113,17 @@ export default function App() {
           incoming.communeId === entry.commune.id ||
           (codeKey(incoming.communeCode) !== '' && codeKey(incoming.communeCode) === codeKey(entry.commune.communeCode))
         ));
+      // CHỐT CHẶN: file của một ĐTV có thể chứa cả bảng kê các địa bàn của người khác (máy ĐTV nào cũng có đủ bảng kê).
+      // Địa bàn đang giao cho ĐTV khác trên máy Admin thì KHÔNG nạp, KHÔNG đồng bộ, KHÔNG đổi người phụ trách.
+      if (nextHouseholds.some(h => isInLocalArea(h) && h.assignedSurveyorId && h.assignedSurveyorId !== resolvedSurveyorId)) {
+        skippedOtherSurveyorAreas++;
+        continue;
+      }
+      // Địa bàn trong file không giao cho ĐTV gửi file và cũng không có phiếu: bỏ qua (tránh ghi đè bằng bảng kê gốc chưa đụng tới)
+      if (!entry.households.some(h => h.assignedSurveyorId === resolvedSurveyorId || (Boolean(h.questionnaire) && hasCompletedSurveyContent(h.questionnaire)))) {
+        skippedOtherSurveyorAreas++;
+        continue;
+      }
       // Khớp hộ: mã hộ -> (STT gốc + tên chủ hộ) -> STT mẫu. Hộ thay thế KHÔNG khớp theo STT mẫu
       // vì nó có thể mang lại STT mẫu của hộ bị thay (sẽ ghi đè nhầm lên hộ mẫu gốc).
       const findIncomingIndex = (incoming: Household): number => {
@@ -4234,8 +4266,10 @@ export default function App() {
         if (incoming.sectorCode) synced.sectorCode = incoming.sectorCode;
         if (incoming.sectorName) synced.sectorName = incoming.sectorName;
         if (incoming.note && incoming.note.length >= (current.note || '').length) synced.note = incoming.note;
-        synced.assignedSurveyorId = resolvedSurveyorId;
-        synced.assignedSurveyorName = resolvedSurveyorName;
+        if (!current.assignedSurveyorId) {
+          synced.assignedSurveyorId = resolvedSurveyorId;
+          synced.assignedSurveyorName = resolvedSurveyorName;
+        }
         const structuralKeys = ['householdHead', 'sampleStatus', 'sttMau', 'address', 'phone', 'membersCount',
           'workingMembersCount', 'sectorCode', 'sectorName', 'note', 'assignedSurveyorId', 'assignedSurveyorName'] as const;
         if (structuralKeys.some(key => synced[key] !== current[key])) {
@@ -4548,6 +4582,9 @@ export default function App() {
     } catch (err) {
       console.error('Không thể đồng bộ số đếm tiến độ lên Firebase:', err);
       progressSynced = false;
+    }
+    if (skippedOtherSurveyorAreas > 0) {
+      importProblems.push(`Đã bỏ qua ${skippedOtherSurveyorAreas} địa bàn trong file không thuộc ĐTV gửi file (đang giao cho ĐTV khác). Đây là bình thường, không cần xử lý.`);
     }
     return {
       updatedCount,
@@ -6085,7 +6122,7 @@ export default function App() {
     });
     // Chỉ giữ địa bàn thật sự có phiếu (hộ thay thế đi kèm được giữ trong địa bàn đó)
     const entries: SurveyWorkPackageEntry[] = Array.from(groups.values())
-      .filter(g => isSurveyorUser || g.hasData)
+      .filter(g => g.hasData || (isSurveyorUser && g.households.some(h => h.assignedSurveyorId === currentUser.id)))
       .map(({ hasData, ...entry }) => entry)
       .sort((a, b) =>
         String(a.commune.communeCode).localeCompare(String(b.commune.communeCode), 'vi', { numeric: true }) ||
