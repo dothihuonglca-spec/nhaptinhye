@@ -113,6 +113,7 @@ export default function AreaDataTransferModal({
   const [incompleteList, setIncompleteList] = useState<IncompleteHouseholdInfo[]>([]);
   const [problemList, setProblemList] = useState<string[]>([]);
   const [isProcessingImport, setIsProcessingImport] = useState(false);
+  const [onlyCompletedImport, setOnlyCompletedImport] = useState(false);
 
   const areasBySurveyorId = useMemo(() => {
     const areaById = new Map(areas.map(area => [area.id, area]));
@@ -475,7 +476,7 @@ export default function AreaDataTransferModal({
                 : 'Tài khoản quản lý chỉ nhập được gói kết quả do ĐTV xuất.'
             );
           }
-          const counts = await onApplyWorkPackage(workPackage);
+          const counts = await onApplyWorkPackage(onlyCompletedImport ? { ...workPackage, importMode: 'COMPLETED_ONLY' } : workPackage);
           const replacedCount = counts.replacedCount || 0;
           const partialCount = counts.partialCount || 0;
           if (counts.incompleteHouseholds) allIncomplete.push(...counts.incompleteHouseholds);
@@ -914,6 +915,20 @@ export default function AreaDataTransferModal({
                     )}
                   </div>
                 </div>
+              )}
+
+              {canManageData && (
+                <label className="flex items-start gap-2 text-[11px] text-slate-700 bg-slate-50 border border-slate-200 rounded p-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={onlyCompletedImport}
+                    onChange={e => setOnlyCompletedImport(e.target.checked)}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    <b>Chỉ nạp các hộ đã hoàn thành</b> (bỏ qua hộ nhập dở, hộ chưa nhập, hộ dự phòng chưa dùng và việc sửa tên). Hộ gốc của hộ thay thế đã hoàn thành vẫn được đánh dấu "đã thay thế".
+                  </span>
+                </label>
               )}
 
               {/* Nút hành động Import */}
