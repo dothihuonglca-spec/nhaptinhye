@@ -59,7 +59,7 @@ export interface SurveyWorkPackage {
   /** 'ALL_SURVEYORS': file gộp kết quả của NHIỀU ĐTV do Admin/Quản lý/Giám sát xuất (chỉ dùng với purpose RESULTS) */
   scope?: 'ALL_SURVEYORS';
   /** 'OVERWRITE': khi nạp, file của ĐTV là bản chuẩn, chép đè toàn bộ lên máy Admin ('ONLY_NEW' là kiểu cũ, nay không còn tác dụng) */
-  importMode?: 'ONLY_NEW' | 'OVERWRITE';
+  importMode?: 'ONLY_NEW' | 'OVERWRITE' | 'COMPLETED_ONLY';
   exportedAt: string;
   exportedBy: {
     id: string;
