@@ -404,7 +404,7 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
         (localCompletedHouseholds === cloudSnapshot.completedHouseholds &&
           localInProgressHouseholds > cloudSnapshot.inProgressHouseholds)
       );
-      const useCloud = !!cloudSnapshot && !localIsNewer && !localHasMore;
+      const useCloud = currentUser.role !== 'ADMIN' && !!cloudSnapshot && !localIsNewer && !localHasMore;
 
       const totalHouseholds = useCloud
         ? Math.min(10, Math.max(localTotalHouseholds, cloudSnapshot!.totalHouseholds))
@@ -481,13 +481,15 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
     };
 
     const cloudOnlyGroups = new Map<string, AreaProgressSnapshot[]>();
-    cloudProgress.forEach(snap => {
-      const k = getAreaProgressKey(snap.communeCode, snap.areaCode);
-      if (!k || knownAreaKeys.has(k) || !canSeeSnapshot(snap)) return;
-      const list = cloudOnlyGroups.get(k) || [];
-      list.push(snap);
-      cloudOnlyGroups.set(k, list);
-    });
+    if (currentUser.role !== 'ADMIN') {
+      cloudProgress.forEach(snap => {
+        const k = getAreaProgressKey(snap.communeCode, snap.areaCode);
+        if (!k || knownAreaKeys.has(k) || !canSeeSnapshot(snap)) return;
+        const list = cloudOnlyGroups.get(k) || [];
+        list.push(snap);
+        cloudOnlyGroups.set(k, list);
+      });
+    }
 
     const cloudOnlyItems: AreaProgressItem[] = [];
     cloudOnlyGroups.forEach((snaps, k) => {
@@ -895,7 +897,7 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
     try {
       const wb = XLSX.utils.book_new();
       const wsData: any[][] = [
-        ['BÁO CÁO TIẾN ĐỘ NHẬP TIN ĐIỀU TRA THU NHẬP (THEO ĐỊA BÀN & XÃ)'],
+        [`BÁO CÁO TIẾN ĐỘ NHẬP TIN ĐIỀU TRA THU NHẬP (THEO ĐỊA BÀN & XÃ)${currentUser.role === 'ADMIN' ? ' - DỮ LIỆU TRÊN MÁY ADMIN' : ''}`],
         [`Ngày xuất báo cáo: ${new Date().toLocaleDateString('vi-VN')} ${new Date().toLocaleTimeString('vi-VN')}`],
         [],
         [
@@ -910,7 +912,8 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
           'Tổng số hộ', 
           'Đã nhập', 
           'Chưa nhập', 
-          'Tiến độ (%)'
+          'Tiến độ (%)',
+          'Nguồn số liệu'
         ]
       ];
 
@@ -927,7 +930,8 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
           item.totalHouseholds,
           item.completedHouseholds,
           item.unenteredHouseholds,
-          `${item.completionRate}%`
+          `${item.completionRate}%`,
+          item.progressSource === 'cloud' ? `Firebase (${formatSyncTime(item.progressUpdatedAt)})` : currentUser.role === 'ADMIN' ? 'Máy Admin' : 'Máy này'
         ]);
       });
 
@@ -945,7 +949,8 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
         progressKPI.totalAssigned,
         progressKPI.totalDone,
         progressKPI.totalWaiting,
-        `${progressKPI.overallRate}%`
+        `${progressKPI.overallRate}%`,
+        currentUser.role === 'ADMIN' ? 'Dữ liệu trên máy Admin' : 'Theo từng địa bàn'
       ]);
 
       const ws = XLSX.utils.aoa_to_sheet(wsData);
@@ -972,7 +977,9 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
               {currentUser.role === 'SURVEYOR'
                 ? ' (liên hệ Admin gửi file dữ liệu địa bàn được giao, rồi nạp vào mục "Xuất nhập dữ liệu") trước khi nhập tin.'
                 : ' (tab "1. Tải bảng kê" hoặc nạp file JSON ở "Xuất nhập dữ liệu").'}
-              {currentUser.role !== 'SURVEYOR' && ' Số liệu tiến độ chung từ Firebase vẫn được hiển thị bên dưới (nếu có), nhưng chưa xem được từng hộ.'}
+              {currentUser.role === 'ADMIN'
+                ? ' Tiến độ của Admin chỉ tính dữ liệu hiện có trên máy này; số liệu Firebase được xem riêng tại khung đối chiếu.'
+                : currentUser.role !== 'SURVEYOR' && ' Số liệu tiến độ chung từ Firebase vẫn được hiển thị bên dưới (nếu có), nhưng chưa xem được từng hộ.'}
             </div>
             <div className="flex flex-wrap gap-2 mt-2">
               {currentUser.role === 'ADMIN' && onOpenImportTab && (
@@ -1019,10 +1026,14 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
           <div>
             <h2 className="font-extrabold text-slate-800 text-sm md:text-base uppercase flex items-center gap-2">
               <BarChart3 className="w-5 h-5 text-teal-700" />
-              <span>Tiến độ Nhập tin theo từng Địa bàn & Xã (Quy chuẩn 10 hộ chính thức/địa bàn)</span>
+              <span>{currentUser.role === 'ADMIN'
+                ? 'Tiến độ theo dữ liệu trên máy Admin (tối đa 10 hộ chính thức/địa bàn)'
+                : 'Tiến độ Nhập tin theo từng Địa bàn & Xã (Quy chuẩn 10 hộ chính thức/địa bàn)'}</span>
             </h2>
             <p className="text-xs text-slate-500 mt-0.5">
-              Thống kê trực quan tiến độ thực hiện điều tra thu nhập, theo dõi số hộ đã nhập, chưa nhập và phân công điều tra viên tự động.
+              {currentUser.role === 'ADMIN'
+                ? 'Chỉ tính trạng thái phiếu trên máy Admin; số đếm Firebase không thay thế dữ liệu cục bộ. Dùng khung đối chiếu để xem chênh lệch và cập nhật dữ liệu.'
+                : 'Thống kê trực quan tiến độ thực hiện điều tra thu nhập, theo dõi số hộ đã nhập, chưa nhập và phân công điều tra viên tự động.'}
             </p>
           </div>
 
@@ -1378,7 +1389,7 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
                         >
                           {item.progressSource === 'cloud'
                             ? `FB ${formatSyncTime(item.progressUpdatedAt)}`
-                            : 'Máy này'}
+                            : currentUser.role === 'ADMIN' ? 'Máy Admin' : 'Máy này'}
                           {item.progressSource === 'cloud' && item.localCompletedHouseholds < item.completedHouseholds && (
                             <span className="text-amber-700"> • máy có {item.localCompletedHouseholds}</span>
                           )}
