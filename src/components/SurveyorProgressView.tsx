@@ -397,7 +397,14 @@ export const SurveyorProgressView: React.FC<SurveyorProgressViewProps> = ({
       // - ngược lại → dùng Firebase.
       const cloudTime = cloudSnapshot ? Date.parse(cloudSnapshot.updatedAt || '') : Number.NaN;
       const localIsNewer = Number.isFinite(localLatestTime) && Number.isFinite(cloudTime) && localLatestTime > cloudTime;
-      const useCloud = !!cloudSnapshot && !localIsNewer;
+      // Máy này (Admin) đã nạp phiếu của ĐTV: phiếu mang ngày nhập CŨ nên có thể "cũ hơn" bản ghi Firebase dù đầy đủ hơn.
+      // Nếu số trên máy nhiều hơn Firebase (hoặc Firebase chưa cập nhật được do hết hạn mức) thì hiện số trên máy ngay.
+      const localHasMore = !!cloudSnapshot && (
+        localCompletedHouseholds > cloudSnapshot.completedHouseholds ||
+        (localCompletedHouseholds === cloudSnapshot.completedHouseholds &&
+          localInProgressHouseholds > cloudSnapshot.inProgressHouseholds)
+      );
+      const useCloud = !!cloudSnapshot && !localIsNewer && !localHasMore;
 
       const totalHouseholds = useCloud
         ? Math.min(10, Math.max(localTotalHouseholds, cloudSnapshot!.totalHouseholds))
