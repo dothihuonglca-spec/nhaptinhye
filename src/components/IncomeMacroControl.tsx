@@ -17,7 +17,8 @@ import {
 } from '../data/communesCatalog';
 import { calculateFullIncome } from '../utils/incomeCalculator';
 import { extrapolateCommune } from '../utils/incomeExtrapolation';
-import { summarizeIncomeByTkcs } from '../utils/incomeMacroSummary';
+import { selectOfficialHouseholdsOfCommune } from '../utils/summaryPivotExport';
+import { PivotExportPanel } from './PivotExportPanel';
 import { 
   FileSpreadsheet, 
   Search, 
@@ -55,7 +56,6 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
   const [selectedStatusFilter, setSelectedStatusFilter] = useState<'ALL' | 'SURVEYED' | 'NOT_SURVEYED'>('ALL');
   const [sortBy, setSortBy] = useState<'stt' | 'name' | 'population' | 'incomeYear' | 'totalFund'>('stt');
   const [sortAsc, setSortAsc] = useState<boolean>(true);
-  const [exportLevel, setExportLevel] = useState<'COMMUNE' | 'TKCS'>('COMMUNE');
 
   // Helper check household surveyed
   const isHouseholdSurveyed = (h: Household) => {
@@ -85,10 +85,7 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
       const communeName = cat.communeName;
       const tkcsCode = cat.tkcsCode || cCommune?.tkcsCode || '';
       const tkcsName = cat.tkcsName || cCommune?.tkcsName || '';
-      const population = COMMUNE_POPULATION_MAP[communeCode] ?? cat.population;
-      if (population === undefined) {
-        throw new Error(`Chưa có dân số trong danh mục cho xã/phường ${communeCode} - ${communeName}.`);
-      }
+      const population = COMMUNE_POPULATION_MAP[communeCode] || cat.population || 25000;
 
       // Structure % (Tỷ trọng cơ cấu)
       const rawTt1 = cCommune?.ttNongLamThuySan ?? cat.ttNongLamThuySan ?? 0;
@@ -98,7 +95,8 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
 
       // Actual households for this commune
       const cHouseholds = households.filter(h => h.communeCode === communeCode || (Boolean(cCommune?.id) && h.communeId === cCommune?.id));
-      const officialHHs = cHouseholds.filter(h => h.sampleStatus === 'CHÍNH THỨC' || !h.sampleStatus);
+      // Cùng một cách chọn hộ chính thức với tab Tiến độ và file Excel pivot: tối đa 10 hộ/địa bàn, bỏ hộ trùng STT mẫu
+      const officialHHs = selectOfficialHouseholdsOfCommune(cHouseholds);
 
       // Tỷ trọng cố định (dạng 0-1) để hiển thị
       const tt1 = rawTt1 > 0 ? Number((rawTt1 / 100).toFixed(4)) : 0;
@@ -119,12 +117,6 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
 
       const perCapitaYear = Number(result.perCapitaYear.toFixed(2));
       const perCapitaMonth = Number(result.perCapitaMonth.toFixed(2));
-      const sectorContributionsYear: [number, number, number, number] = [
-        result.sectors[0].contributionYear,
-        result.sectors[1].contributionYear,
-        result.sectors[2].contributionYear,
-        result.sectors[3].contributionYear
-      ];
 
       // Macro Local Funds:
       // Q = O * D (Nghìn đồng/năm) - giữ nguyên số chưa làm tròn để gộp tỉnh chính xác
@@ -154,7 +146,6 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
         groupYearS2,
         groupYearS3,
         groupYearS4,
-        sectorContributionsYear,
         // Bình quân đầu người
         perCapitaYear,
         perCapitaMonth,
@@ -172,8 +163,6 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
       };
     });
   }, [communes, households]);
-
-  const tkcsSummaries = useMemo(() => summarizeIncomeByTkcs(macroRows), [macroRows]);
 
   // Province Totals (Dòng Toàn Tỉnh)
   const provinceSummary = useMemo(() => {
@@ -235,93 +224,11 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
   // Handle Export Excel
   const handleExportExcel = () => {
     try {
-      const wb = XLSX.utils.book_new();
-
-      if (exportLevel === 'TKCS') {
-        const tkcsRows: any[][] = [
-          ['TỔNG HỢP THU NHẬP BÌNH QUÂN VÀ SUY RỘNG THEO TỔ TKCS'],
-          [`Ngày xuất: ${new Date().toLocaleDateString('vi-VN')} | Dữ liệu phiếu trên máy Admin | Đơn vị thu nhập: nghìn đồng`],
-          [],
-          [
-            'Mã TKCS', 'Tên TKCS', 'Số xã/phường', 'Xã có số liệu', 'Dân số toàn tổ',
-            'Dân số xã có số liệu', 'Hộ hợp lệ', 'Mẫu chính thức',
-            'Đóng góp TNBQ năm: Nông, lâm, thủy sản',
-            'Đóng góp TNBQ năm: Công nghiệp, xây dựng',
-            'Đóng góp TNBQ năm: Thương mại, dịch vụ',
-            'Đóng góp TNBQ năm: Thu khác, tiền lương',
-            'TNBQ năm', 'TNBQ tháng', 'Quỹ thu nhập năm', 'Quỹ thu nhập tháng', 'Tình trạng'
-          ],
-          ...tkcsSummaries.map(row => [
-            row.tkcsCode,
-            row.tkcsName,
-            row.communeCount,
-            row.surveyedCommunesCount,
-            row.population,
-            row.surveyedPopulation,
-            row.surveyedHouseholds,
-            row.totalSampleHouseholds,
-            ...row.sectorContributionsYear,
-            row.perCapitaYear,
-            row.perCapitaMonth,
-            Math.round(row.fundYear),
-            Math.round(row.fundMonth),
-            row.isPartial ? 'Tạm tính / còn thiếu xã hoặc nhóm' : 'Đủ số liệu'
-          ])
-        ];
-        const tkcsSheet = XLSX.utils.aoa_to_sheet(tkcsRows);
-        tkcsSheet['!cols'] = [
-          { wch: 12 }, { wch: 24 }, { wch: 12 }, { wch: 12 }, { wch: 18 },
-          { wch: 20 }, { wch: 12 }, { wch: 14 }, { wch: 24 }, { wch: 24 },
-          { wch: 24 }, { wch: 24 }, { wch: 16 }, { wch: 16 }, { wch: 18 },
-          { wch: 18 }, { wch: 32 }
-        ];
-        XLSX.utils.book_append_sheet(wb, tkcsSheet, 'TongHopTKCS');
-
-        const communeDetails: any[][] = [
-          ['CHI TIẾT SUY RỘNG THU NHẬP THEO 104 XÃ/PHƯỜNG'],
-          ['Mỗi dòng xã dùng tỷ trọng cố định và số hộ hợp lệ trên máy Admin; nhóm chưa có số liệu được loại ra và chia lại tỷ trọng theo công thức chung.'],
-          [],
-          [
-            'Mã TKCS', 'Tên TKCS', 'Mã xã', 'Tên xã', 'Dân số',
-            'Tỷ trọng Nông, lâm, thủy sản (%)', 'Tỷ trọng Công nghiệp, xây dựng (%)',
-            'Tỷ trọng Thương mại, dịch vụ (%)', 'Tỷ trọng Thu khác, tiền lương (%)',
-            'TNBQ nhóm 1 năm', 'TNBQ nhóm 2 năm', 'TNBQ nhóm 3 năm', 'TNBQ nhóm 4 năm',
-            'TNBQ xã năm', 'TNBQ xã tháng', 'Quỹ thu nhập năm', 'Quỹ thu nhập tháng',
-            'Hộ hợp lệ', 'Mẫu chính thức', 'Trạng thái suy rộng'
-          ],
-          ...macroRows.map(row => [
-            row.tkcsCode,
-            row.tkcsName,
-            row.communeCode,
-            row.communeName,
-            row.population,
-            row.rawTt1,
-            row.rawTt2,
-            row.rawTt3,
-            row.rawTt4,
-            row.groupYearS1 ?? '',
-            row.groupYearS2 ?? '',
-            row.groupYearS3 ?? '',
-            row.groupYearS4 ?? '',
-            row.perCapitaYear,
-            row.perCapitaMonth,
-            row.totalLocalIncomeYear,
-            row.totalLocalIncomeMonth,
-            row.surveyedCount,
-            row.totalSample,
-            row.hasSurveyData ? (row.isPartial ? 'Tạm tính / thiếu nhóm' : 'Có số liệu') : 'Chưa có số liệu'
-          ])
-        ];
-        const detailSheet = XLSX.utils.aoa_to_sheet(communeDetails);
-        detailSheet['!cols'] = Array.from({ length: 20 }, (_, index) => ({ wch: index < 4 ? 22 : 18 }));
-        XLSX.utils.book_append_sheet(wb, detailSheet, 'ChiTietXaPhuong');
-        XLSX.writeFile(wb, `Tong_Hop_Thu_Nhap_Theo_TKCS_${new Date().toISOString().slice(0, 10)}.xlsx`);
-        showNotification('success', `Đã xuất tổng hợp ${tkcsSummaries.length} Tổ TKCS và chi tiết ${macroRows.length} xã/phường.`);
-        return;
-      }
-
       // Header Structure
       const headers = [
+        ["BẢNG KIỂM SOÁT VÀ SUY RỘNG THU NHẬP BÌNH QUÂN ĐỊA PHƯƠNG TOÀN TỈNH"],
+        [`(Dành riêng cho Quản trị viên - Ngày xuất: ${new Date().toLocaleDateString('vi-VN')})`],
+        [""],
         [
           "STT",
           "Tên Xã, Phường",
@@ -332,8 +239,7 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
           "Suy rộng TNBQ xã / năm (Nghìn đồng)", "", "", "",
           "Thu nhập bình quân đầu người năm (Nghìn đồng)",
           "Thu nhập bình quân đầu người (Nghìn đồng) Tháng",
-          "Thu nhập địa phương (Nghìn đồng)", "",
-          "Thông tin điều tra và phạm vi tổng hợp", "", "", "", "", ""
+          "Thu nhập địa phương (Nghìn đồng)", ""
         ],
         [
           "",
@@ -352,16 +258,13 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
           "=G*K+H*L+I*M+J*N",
           "=O/12",
           "Năm (=O*D)",
-          "Tháng (=P*D)",
-          "Mã TKCS", "Tên TKCS", "Hộ hợp lệ", "Mẫu chính thức", "Trạng thái suy rộng",
-          "Dân số xã có số liệu"
+          "Tháng (=P*D)"
         ],
         [
           "A", "B", "C", "D", "1",
           "G", "H", "I", "J",
           "K", "L", "M", "N",
-          "O", "P", "Q", "R",
-          "S", "T", "U", "V", "W", "X"
+          "O", "P", "Q", "R"
         ],
         // Dòng Toàn Tỉnh
         [
@@ -375,18 +278,13 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
           provinceSummary.avgYear,
           provinceSummary.avgMonth,
           provinceSummary.totalYearFund,
-          provinceSummary.totalMonthFund,
-          '',
-          '',
-          provinceSummary.totalSurveyedHHs,
-          provinceSummary.totalSampleHHs,
-          provinceSummary.isPartial ? 'Tạm tính' : 'Đủ số liệu',
-          provinceSummary.surveyedPop
+          provinceSummary.totalMonthFund
         ]
       ];
 
-      // Rows
-      macroRows.forEach(r => {
+      // Rows: xuất theo bộ lọc Tổ TKCS đang chọn (Tất cả = đủ 104 xã/phường)
+      const exportRows = selectedTkcsFilter === 'ALL' ? macroRows : macroRows.filter(r => r.tkcsCode === selectedTkcsFilter);
+      exportRows.forEach(r => {
         headers.push([
           r.stt,
           r.communeName,
@@ -404,13 +302,7 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
           r.perCapitaYear,
           r.perCapitaMonth,
           r.totalLocalIncomeYear,
-          r.totalLocalIncomeMonth,
-          r.tkcsCode,
-          r.tkcsName,
-          r.surveyedCount,
-          r.totalSample,
-          r.hasSurveyData ? (r.isPartial ? 'Tạm tính' : 'Có số liệu') : 'Chưa có số liệu',
-          r.hasSurveyData ? r.population : 0
+          r.totalLocalIncomeMonth
         ]);
       });
 
@@ -418,30 +310,25 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
       
       // Merge cells for headers
       ws['!merges'] = [
-        { s: { r: 0, c: 0 }, e: { r: 1, c: 0 } },
-        { s: { r: 0, c: 1 }, e: { r: 1, c: 1 } },
-        { s: { r: 0, c: 2 }, e: { r: 1, c: 2 } },
-        { s: { r: 0, c: 3 }, e: { r: 1, c: 3 } },
-        { s: { r: 0, c: 4 }, e: { r: 1, c: 4 } },
-        { s: { r: 0, c: 5 }, e: { r: 0, c: 8 } },
-        { s: { r: 0, c: 9 }, e: { r: 0, c: 12 } },
-        { s: { r: 0, c: 13 }, e: { r: 1, c: 13 } },
-        { s: { r: 0, c: 14 }, e: { r: 1, c: 14 } },
-        { s: { r: 0, c: 15 }, e: { r: 0, c: 16 } },
-        { s: { r: 0, c: 17 }, e: { r: 0, c: 22 } }
-      ];
-      ws['!cols'] = [
-        { wch: 7 }, { wch: 25 }, { wch: 12 }, { wch: 16 }, { wch: 18 },
-        { wch: 15 }, { wch: 15 }, { wch: 15 }, { wch: 17 },
-        { wch: 16 }, { wch: 16 }, { wch: 16 }, { wch: 17 },
-        { wch: 18 }, { wch: 18 }, { wch: 18 }, { wch: 18 },
-        { wch: 12 }, { wch: 23 }, { wch: 13 }, { wch: 16 },
-        { wch: 24 }, { wch: 21 }
+        { s: { r: 0, c: 0 }, e: { r: 0, c: 16 } },
+        { s: { r: 1, c: 0 }, e: { r: 1, c: 16 } },
+        // Multi-level column headers
+        { s: { r: 3, c: 0 }, e: { r: 4, c: 0 } },
+        { s: { r: 3, c: 1 }, e: { r: 4, c: 1 } },
+        { s: { r: 3, c: 2 }, e: { r: 4, c: 2 } },
+        { s: { r: 3, c: 3 }, e: { r: 4, c: 3 } },
+        { s: { r: 3, c: 4 }, e: { r: 4, c: 4 } },
+        { s: { r: 3, c: 5 }, e: { r: 3, c: 8 } },
+        { s: { r: 3, c: 9 }, e: { r: 3, c: 12 } },
+        { s: { r: 3, c: 13 }, e: { r: 4, c: 13 } },
+        { s: { r: 3, c: 14 }, e: { r: 4, c: 14 } },
+        { s: { r: 3, c: 15 }, e: { r: 3, c: 16 } }
       ];
 
+      const wb = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(wb, ws, "KiemSoatThuNhap");
-      XLSX.writeFile(wb, `Kiem_Soat_Thu_Nhap_Toan_Tinh_${new Date().toISOString().slice(0, 10)}.xlsx`);
-      showNotification('success', `Đã xuất báo cáo theo xã/phường (${macroRows.length} xã) thành công!`);
+      XLSX.writeFile(wb, `Kiem_Soat_Thu_Nhap_${selectedTkcsFilter === 'ALL' ? 'Toan_Tinh' : selectedTkcsFilter}_${new Date().toISOString().slice(0, 10)}.xlsx`);
+      showNotification('success', 'Đã xuất file Excel kiểm soát thu nhập thành công!');
     } catch (e: any) {
       console.error(e);
       showNotification('error', 'Lỗi khi xuất file Excel: ' + e.message);
@@ -471,23 +358,20 @@ export const IncomeMacroControl: React.FC<IncomeMacroControlProps> = ({
 
           {/* Action Buttons: Neat, vibrant, equal height */}
           <div className="flex flex-wrap items-center gap-2">
-            <label className="flex items-center gap-1.5 text-xs font-bold text-white">
-              <span>Xuất theo:</span>
-              <select
-                value={exportLevel}
-                onChange={event => setExportLevel(event.target.value as 'COMMUNE' | 'TKCS')}
-                className="h-9 rounded-md border border-white/30 bg-teal-950 px-2 text-white cursor-pointer"
-              >
-                <option value="COMMUNE">104 xã/phường</option>
-                <option value="TKCS">{tkcsSummaries.length} Tổ TKCS</option>
-              </select>
-            </label>
+            <PivotExportPanel
+              households={households}
+              communes={communes}
+              showNotification={showNotification}
+              defaultTkcs={selectedTkcsFilter}
+              key={selectedTkcsFilter}
+              className="text-white"
+            />
             <button
               onClick={handleExportExcel}
               className="h-9 px-4 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-white rounded-md font-bold text-xs flex items-center gap-1.5 shadow-sm transition-all cursor-pointer"
             >
               <FileSpreadsheet className="w-4 h-4" />
-              <span>{exportLevel === 'TKCS' ? 'Xuất Excel TKCS + chi tiết xã' : 'Xuất Excel 104 xã/phường'}</span>
+              <span>Xuất Excel chuẩn biểu (theo bộ lọc)</span>
             </button>
           </div>
         </div>
