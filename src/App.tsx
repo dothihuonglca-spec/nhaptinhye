@@ -24,6 +24,7 @@ import SurveyorManagement from './components/SurveyorManagement';
 import { SurveyorProgressView } from './components/SurveyorProgressView';
 import ExcelHeaderConfigModal from './components/ExcelHeaderConfigModal';
 import { IncomeMacroControl } from './components/IncomeMacroControl';
+import { PivotExportPanel } from './components/PivotExportPanel';
 import { ReplaceHouseholdModal } from './components/ReplaceHouseholdModal';
 import IndustrialSurveyModule from './components/IndustrialSurveyModule';
 import AreaDataTransferModal from './components/AreaDataTransferModal';
@@ -63,6 +64,7 @@ import {
   isReplacementHousehold,
   isOfficialSurveyHousehold,
   OFFICIAL_HOUSEHOLDS_PER_AREA,
+  selectOfficialHouseholdsByArea,
   isReplacedSampleStatus,
   isOfficialSampleStatus,
   parseReplacementNote,
@@ -3192,7 +3194,8 @@ export default function App() {
   // Tính toán Tổng hợp nhanh kết nối chuẩn xác Danh mục Xã / TKCS và Phiếu điều tra thực tế
   const tnhSummary = useMemo(() => {
     const list = tnhScopeHouseholds;
-    const officialList = list.filter(h => h.sampleStatus === 'CHÍNH THỨC' || !h.sampleStatus);
+    // Cùng cách chọn hộ với tab Tiến độ: tối đa 10 hộ/địa bàn, có tính hộ dự phòng đã dùng thay mẫu
+    const officialList = selectOfficialHouseholdsByArea(list);
     const totalSurveyHH = officialList.length;
 
     // Tổng hợp số liệu bảng kê & mẫu từ danh mục các xã trong phạm vi
@@ -3399,7 +3402,7 @@ export default function App() {
       };
 
       const cHouseholds = hhByCommune.get(c.id) || (c.communeCode ? hhByCommune.get(c.communeCode) : null) || [];
-      const officialHHs = cHouseholds.filter(h => h.sampleStatus === 'CHÍNH THỨC' || !h.sampleStatus);
+      const officialHHs = selectOfficialHouseholdsByArea(cHouseholds);
       const totalHH = cHouseholds.length;
       const officialCount = officialHHs.length;
 
@@ -6352,7 +6355,7 @@ export default function App() {
         s.code,
         s.name,
         s.bkCount,
-        `${s.percent}%{s.adjustedPercent !== null && Math.abs(s.adjustedPercent - Number(s.percent)) > 0.01 && (<span className="block text-[10px] font-semibold text-amber-700" title="Tỷ trọng đã chia lại cho các nhóm có số liệu">→ {s.adjustedPercent}%</span>)}`,
+        `${s.percent}%${s.adjustedPercent !== null && Math.abs(s.adjustedPercent - Number(s.percent)) > 0.01 ? ` → ${s.adjustedPercent}%` : ''}`,
         s.mauAlloc,
         s.surveyCount,
         s.perCapitaMonth,
@@ -8156,6 +8159,14 @@ export default function App() {
               </div>
 
               <div className="flex items-center gap-2.5 flex-wrap">
+                {currentUser.role === 'ADMIN' && (
+                  <PivotExportPanel
+                    households={households}
+                    communes={communes}
+                    showNotification={showNotification}
+                    className="text-slate-800"
+                  />
+                )}
                 <button 
                   onClick={handleExportExcelTNH}
                   className="px-3.5 py-1.5 bg-emerald-700 hover:bg-emerald-600 active:bg-emerald-800 text-white rounded text-xs font-bold flex items-center gap-1.5 cursor-pointer shadow-xs transition-colors"
