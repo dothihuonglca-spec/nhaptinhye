@@ -3505,6 +3505,16 @@ export default function App() {
     showNotification('success', `Đã lưu phiếu Phụ lục II của hộ "${updatedHousehold.householdHead}" thành công.`);
   };
 
+  // Admin nhập file Excel xã đã sửa lại: ghi các hộ đã cập nhật vào đúng hộ/địa bàn (đã kiểm tra ở bước xem trước)
+  const handleApplyRedoImport = (changed: Household[]) => {
+    if (changed.length === 0) return;
+    const changedById = new Map(changed.map(h => [h.id, h]));
+    const next = households.map(h => changedById.get(h.id) || h);
+    setHouseholds(next);
+    try { localStorage.setItem('cached_households', JSON.stringify(next)); } catch (e) {}
+    syncAreaProgressForHouseholds(next, changed);
+  };
+
   const handleExportLocalBackup = () => {
     try {
       const snapshot = { communes, areas, households, surveyors, departments };
@@ -8164,6 +8174,7 @@ export default function App() {
                     households={households}
                     communes={communes}
                     showNotification={showNotification}
+                    onApplyRedoImport={handleApplyRedoImport}
                     className="text-slate-800"
                   />
                 )}
