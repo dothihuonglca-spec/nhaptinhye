@@ -25,6 +25,7 @@ import {
 import { selectOfficialHouseholdsByArea } from './areaDataTransfer';
 
 export const ALL_TKCS = 'ALL';
+export const ALL_COMMUNES = 'ALL';
 
 type Weights = [number, number, number, number];
 type SectorYear = [number | null, number | null, number | null, number | null];
@@ -107,6 +108,19 @@ export const getTkcsOptions = (): TkcsOption[] => {
   return Array.from(map.values()).sort((a, b) => a.code.localeCompare(b.code, 'vi', { numeric: true }));
 };
 
+export interface CommuneOption {
+  code: string;
+  name: string;
+  tkcsCode: string;
+}
+
+/** Danh sách xã/phường để làm bộ lọc xuất. Nếu chọn TKCS thì chỉ liệt kê xã thuộc TKCS đó. */
+export const getCommuneOptions = (tkcsCode: string = ALL_TKCS): CommuneOption[] =>
+  OFFICIAL_COMMUNES_CATALOG
+    .filter(c => c.communeCode && (tkcsCode === ALL_TKCS || c.tkcsCode === tkcsCode))
+    .map(c => ({ code: c.communeCode, name: c.communeName, tkcsCode: c.tkcsCode }))
+    .sort((a, b) => a.name.localeCompare(b.name, 'vi', { numeric: true }));
+
 /** Hộ chính thức của một xã: tối đa 10 hộ/địa bàn, có tính hộ dự phòng đã dùng thay mẫu (xem selectOfficialHouseholds). */
 export const selectOfficialHouseholdsOfCommune = (communeHouseholds: Household[]): Household[] =>
   selectOfficialHouseholdsByArea(communeHouseholds);
@@ -117,7 +131,8 @@ const num = (v: unknown): number => Number(v) || 0;
 export const buildPivotRows = (
   households: Household[],
   communes: Commune[],
-  tkcsCode: string = ALL_TKCS
+  tkcsCode: string = ALL_TKCS,
+  communeCode: string = ALL_COMMUNES
 ): PivotResult => {
   const stateByCode = new Map<string, Commune>();
   communes.forEach(c => { if (c.communeCode) stateByCode.set(c.communeCode, c); });
@@ -134,7 +149,10 @@ export const buildPivotRows = (
     else hhByCommune.set(code, [h]);
   });
 
-  const catalog = OFFICIAL_COMMUNES_CATALOG.filter(c => tkcsCode === ALL_TKCS || c.tkcsCode === tkcsCode);
+  const catalog = OFFICIAL_COMMUNES_CATALOG.filter(c =>
+    (tkcsCode === ALL_TKCS || c.tkcsCode === tkcsCode) &&
+    (communeCode === ALL_COMMUNES || c.communeCode === communeCode)
+  );
 
   type Prepared = {
     row: PivotCommuneRow;
@@ -234,16 +252,28 @@ export const buildPivotRows = (
     items.forEach(i => rows.push(i.row));
   });
 
-  const scopeName = tkcsCode === ALL_TKCS
-    ? 'Toàn tỉnh'
-    : (catalog[0]?.tkcsName || tkcsCode);
+  const isOneCommune = communeCode !== ALL_COMMUNES;
+  const scopeName = isOneCommune
+    ? (catalog[0]?.communeName || communeCode)
+    : tkcsCode === ALL_TKCS
+      ? 'Toàn tỉnh'
+      : (catalog[0]?.tkcsName || tkcsCode);
   const total = makeGroup('total', '', '', `TỔNG CỘNG (${scopeName})`, prepared);
+
+  let scopeLabel: string;
+  if (isOneCommune) {
+    scopeLabel = `${scopeName}${catalog[0]?.tkcsName ? ` - ${catalog[0].tkcsName}` : ''} (1 xã/phường)`;
+  } else if (tkcsCode === ALL_TKCS) {
+    scopeLabel = `Tất cả ${prepared.length} xã/phường`;
+  } else {
+    scopeLabel = `${scopeName} (${prepared.length} xã/phường)`;
+  }
 
   return {
     rows,
     total,
     communeCount: prepared.length,
-    scopeLabel: tkcsCode === ALL_TKCS ? `Tất cả ${prepared.length} xã/phường` : `${scopeName} (${prepared.length} xã/phường)`
+    scopeLabel
   };
 };
 
@@ -285,7 +315,11 @@ const noteOf = (r: PivotRow): string => {
   return parts.join(', ');
 };
 
-export const exportPivotToExcel = (result: PivotResult, tkcsCode: string): string => {
+export const exportPivotToExcel = (
+  result: PivotResult,
+  tkcsCode: string,
+  communeCode: string = ALL_COMMUNES
+): string => {
   const today = new Date();
   const aoa: any[][] = [];
   aoa.push(['TỔNG HỢP THU NHẬP BÌNH QUÂN ĐẦU NGƯỜI - CÓ SUY RỘNG']);
@@ -377,7 +411,9 @@ export const exportPivotToExcel = (result: PivotResult, tkcsCode: string): strin
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'TongHop_SuyRong');
 
-  const scopeFile = tkcsCode === ALL_TKCS ? 'Tat_ca_104_xa_phuong' : tkcsCode;
+  const scopeFile = communeCode !== ALL_COMMUNES
+    ? `${tkcsCode === ALL_TKCS ? '' : tkcsCode + '_'}${communeCode}`
+    : tkcsCode === ALL_TKCS ? 'Tat_ca_104_xa_phuong' : tkcsCode;
   const fileName = `Tong_Hop_Suy_Rong_${scopeFile}_${today.toISOString().slice(0, 10)}.xlsx`;
   XLSX.writeFile(wb, fileName);
   return fileName;
