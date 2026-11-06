@@ -159,9 +159,12 @@ export function isInProgressSurveyStatus(status?: string): boolean {
 
 /**
  * Chọn đúng 10 hộ chính thức của một địa bàn, KẾT QUẢ GIỐNG NHAU trên mọi máy:
- * - chỉ lấy hộ chính thức;
- * - các hộ trùng STT mẫu (trừ STT trống/"DP") chỉ giữ 1 hộ: ưu tiên hộ đã hoàn thành > đang nhập > chưa nhập, rồi hộ cập nhật mới hơn;
- * - sắp theo STT mẫu tăng dần rồi mới cắt lấy 10 hộ (không phụ thuộc thứ tự mảng trên từng máy).
+ * - lấy hộ chính thức; các hộ trùng STT mẫu (trừ STT trống/"DP") chỉ giữ 1 hộ: ưu tiên hộ đã hoàn thành > đang nhập > chưa nhập, rồi hộ cập nhật mới hơn;
+ * - sắp theo STT mẫu tăng dần rồi mới cắt lấy 10 hộ (không phụ thuộc thứ tự mảng trên từng máy);
+ * - HỘ DỰ PHÒNG ĐÃ DÙNG THAY MẪU (đã nhập xong / đang nhập, chưa bị đánh dấu "ĐÃ THAY THẾ") cũng được tính:
+ *     + nếu địa bàn chưa đủ 10 hộ thì bù vào chỗ còn thiếu;
+ *     + nếu đã đủ 10 hộ nhưng còn hộ mẫu CHƯA NHẬP thì hộ dự phòng đã nhập sẽ vào thay chỗ hộ chưa nhập
+ *       (hộ có STT lớn nhất bị thay trước). Hộ dự phòng chưa dùng thì không bao giờ được tính.
  */
 export function selectOfficialHouseholds<T extends Household>(households: T[]): T[] {
   const rank = (h: T) => isCompletedSurveyStatus(h.surveyStatus) ? 2 : isInProgressSurveyStatus(h.surveyStatus) ? 1 : 0;
@@ -181,13 +184,51 @@ export function selectOfficialHouseholds<T extends Household>(households: T[]): 
     }
   });
   const sttNumber = (h: T) => /^\d+$/.test((h.sttMau || '').trim()) ? Number(h.sttMau) : Number.MAX_SAFE_INTEGER;
-  return Array.from(best.values())
-    .sort((a, b) =>
-      sttNumber(a) - sttNumber(b) ||
-      (a.sttMau || '').localeCompare(b.sttMau || '', 'vi', { numeric: true }) ||
-      a.id.localeCompare(b.id)
+  const bySttAsc = (a: T, b: T) =>
+    sttNumber(a) - sttNumber(b) ||
+    (a.sttMau || '').localeCompare(b.sttMau || '', 'vi', { numeric: true }) ||
+    a.id.localeCompare(b.id);
+
+  const picked = Array.from(best.values()).sort(bySttAsc).slice(0, OFFICIAL_HOUSEHOLDS_PER_AREA);
+
+  // Hộ dự phòng đã dùng (có số liệu) nhưng chưa được chuyển thành "CHÍNH THỨC" bằng chức năng Thay mẫu
+  const usedReserves = households
+    .filter(h =>
+      !isOfficialSurveyHousehold(h) &&
+      !isReplacedSampleStatus(h.sampleStatus) &&
+      rank(h) > 0
     )
-    .slice(0, OFFICIAL_HOUSEHOLDS_PER_AREA);
+    .sort((a, b) => rank(b) - rank(a) || time(b) - time(a) || bySttAsc(a, b));
+  if (usedReserves.length === 0) return picked;
+
+  const result = [...picked];
+  const spare = [...usedReserves];
+  // 1. Bù vào chỗ còn thiếu cho đủ 10 hộ
+  while (result.length < OFFICIAL_HOUSEHOLDS_PER_AREA && spare.length > 0) result.push(spare.shift()!);
+  // 2. Đã đủ 10 hộ: hộ dự phòng đã nhập thay chỗ hộ mẫu chưa nhập (STT lớn nhất bị thay trước)
+  const notEntered = result.filter(h => rank(h) === 0).sort((a, b) => bySttAsc(b, a));
+  while (spare.length > 0 && notEntered.length > 0) {
+    const out = notEntered.shift()!;
+    result[result.indexOf(out)] = spare.shift()!;
+  }
+  return result.sort(bySttAsc);
+}
+
+/**
+ * Chọn hộ chính thức cho NHIỀU địa bàn (một xã, một TKCS hoặc cả tỉnh): gom theo địa bàn
+ * rồi áp dụng selectOfficialHouseholds cho từng địa bàn. Dùng chung cho tiến độ, tổng hợp và xuất Excel.
+ */
+export function selectOfficialHouseholdsByArea<T extends Household>(households: T[]): T[] {
+  const byArea = new Map<string, T[]>();
+  households.forEach(h => {
+    const key = getAreaProgressKey(h.communeCode, h.areaCode) || `id:${h.areaId || h.areaCode || ''}`;
+    const list = byArea.get(key);
+    if (list) list.push(h);
+    else byArea.set(key, [h]);
+  });
+  const result: T[] = [];
+  byArea.forEach(list => result.push(...selectOfficialHouseholds(list)));
+  return result;
 }
 
 /**
